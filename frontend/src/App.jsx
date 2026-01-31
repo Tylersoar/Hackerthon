@@ -6,90 +6,14 @@ import 'bootstrap/dist/css/bootstrap.min.css'
 function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [wsConnected, setWsConnected] = useState(true);
+  const [wsConnected, setWsConnected] = useState(false);
 
 const [showModal, setShowModal] = useState(false);
 const [selectedClaim, setSelectedClaim] = useState(null);
 
-  // const [transcripts, setTranscripts] = useState([]);
-  const [transcriptSegments, setTranscriptSegments] = useState([
-    {
-      id: 'seg-1',
-      text: "Today I want to talk about the economy. The ",
-      claimId: null
-    },
-    {
-      id: 'seg-2',
-      text: "unemployment rate is at 3%",
-      claimId: 'claim-1'
-    },
-    {
-      id: 'seg-3',
-      text: " which is historically low. ",
-      claimId: null
-    },
-    {
-      id: 'seg-4',
-      text: "Water boils at 100 degrees Celsius at sea level",
-      claimId: 'claim-2'
-    },
-    {
-      id: 'seg-5',
-      text: ". ",
-      claimId: null
-    },
-    {
-      id: 'seg-6',
-      text: "The Earth is flat",
-      claimId: 'claim-3'
-    },
-    {
-      id: 'seg-7',
-      text: " and this has been proven by many scientists. Climate change is affecting our planet and ",
-      claimId: null
-    },
-    {
-      id: 'seg-8',
-      text: "temperatures have risen by 1.5 degrees globally",
-      claimId: 'claim-4'
-    },
-    {
-      id: 'seg-9',
-      text: " since pre-industrial times. The population of the United States is over 330 million people. Vaccines cause autism according to recent studies. The Great Wall of China is visible from space with the naked eye. Python is the most popular programming language in 2024.",
-      claimId: null
-    }
-  ]);
+  const [transcriptSegments, setTranscriptSegments] = useState([]);
 
-  const [claims, setClaims] = useState([
-    {
-      id: 'claim-1',
-      text: "unemployment rate is at 3%",
-      status: 'complete',
-      isTrue: true,
-      explanation: "According to the U.S. Bureau of Labor Statistics, the unemployment rate was approximately 3.7% in recent months, which is considered historically low and close to the stated 3%."
-    },
-    {
-      id: 'claim-2',
-      text: "Water boils at 100 degrees Celsius at sea level",
-      status: 'complete',
-      isTrue: true,
-      explanation: "This is scientifically accurate. At standard atmospheric pressure (sea level), pure water boils at exactly 100°C (212°F)."
-    },
-    {
-      id: 'claim-3',
-      text: "The Earth is flat",
-      status: 'complete',
-      isTrue: false,
-      explanation: "This is false. The Earth is an oblate spheroid. This has been proven through satellite imagery, physics, space exploration, and centuries of scientific observation."
-    },
-    {
-      id: 'claim-4',
-      text: "temperatures have risen by 1.5 degrees globally",
-      status: 'checking',
-      isTrue: null,
-      explanation: null
-    }
-  ]);
+  const [claims, setClaims] = useState([]);
 
   const mediaRecorderReference = useRef(null);
   const audioContextReference = useRef(null);
@@ -98,7 +22,7 @@ const [selectedClaim, setSelectedClaim] = useState(null);
   const wsRef = useRef(null);
 
   useEffect(() => {
-    // connectWebSocket();
+    connectWebSocket();
 
     // Cleanup when component unmounts
     return () => {
@@ -106,85 +30,128 @@ const [selectedClaim, setSelectedClaim] = useState(null);
         cancelAnimationFrame(animationFrameReference.current);
       }
 
-      // if (wsRef.current) {
-      //   wsRef.current.close();
-      // }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     }
   }, []);
 
-  // const connectWebSocket = () => {
-  //   try {
-  //     const ws = new WebSocket('ws://localhost:8000/ws');
+  const connectWebSocket = () => {
+    try {
+      const ws = new WebSocket('ws://localhost:8000/ws');
 
-  //     ws.onopen = () => {
-  //       console.log("WebSocket connected!");
-  //       setWsConnected(true);
-  //     };
+      ws.onopen = () => {
+        console.log("WebSocket connected!");
+        setWsConnected(true);
+      };
 
-        // ADD SPLITTING FIX HERE
-  //     ws.onmessage = (event) => {
-  //       const data = JSON.parse(event.data);
-  //       console.log("Received from backend: ", data);
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log("Received from backend: ", data);
 
-  //       if (data.type === 'transcript') {
-  //         setTranscriptSegments(prev => [...prev, {
-  //              id: `seg-${Date.now()}`,
-  //              text: data.text,
-  //              claimId: null
-  //        }]);
-  //       } else if (data.type === 'claim_detected') {
-            //  const claimId = data.id;
+        if (data.type === 'transcript') {
+          setTranscriptSegments(prev => [...prev, {
+               id: `seg-${Date.now()}-${Math.random()}`,
+               text: data.text,
+               claimId: null
+         }]);
+        } else if (data.type === 'claim_detected') {
+            const claimId = data.id;
+            const claimText = data.claim;
 
-            //  setTranscriptSegments(prev => [...prev, {
-            //   id: `seg-${Date.now()}`,
-            //   text: data.claim,
-            //   claimId: claimId
-            //  }]);
+            // Find the last segment that contains this claim
+            setTranscriptSegments(prev => {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                    const segment = prev[i];
+                    const claimIndex = segment.text.indexOf(claimText);
 
-  //         setClaims(prev => [...prev, {
-  //           id: claimId,
-  //           text: data.claim,
-  //           status: 'checking',
-  //           isTrue: null,
-  //           explanation: null
-  //         }]);
-  //       }
+                    if (claimIndex !== -1 && !segment.claimId) {
+                        const before = segment.text.substring(0, claimIndex);
+                        const after = segment.text.substring(claimIndex + claimText.length);
 
-  //       else if (data.type === 'fact_check') {
-  //         setClaims(prev => prev.map(c =>
-  //           c.id === data.id
-  //           ? { ...c,
-  //               status: 'complete',
-  //               isTrue: data.result.isTrue,
-  //                explanation: data.result.explanation
-  //                }
-  //           : c
-  //         ));
-  //       }
-  //     };
+                        const newSegments = [...prev.slice(0, i)];
 
-  //     ws.onerror = (error) => {
-  //       console.error("WebSocket error: ", error);
-  //       setWsConnected(false);
-  //     };
+                        // Add before text if it exists
+                        if (before) {
+                            newSegments.push({
+                                id: `seg-${Date.now()}-before`,
+                                text: before,
+                                claimId: null
+                            });
+                        }
 
-  //     ws.onclose = () => {
-  //       console.log("WebSocket disconnected.");
-  //       setWsConnected(false);
-  //       setTimeout(connectWebSocket, 3000);
-  //     };
+                        // Add the claim itself
+                        newSegments.push({
+                            id: `seg-${Date.now()}-claim`,
+                            text: claimText,
+                            claimId: claimId
+                        });
 
-  //     wsRef.current = ws;
-  //   } catch (error) {
-  //     console.error("Failed to connect to WebSocket: ", error);
-  //   }
-  // }
+                        // Add the after text if it exists
+                        if (after) {
+                            newSegments.push({
+                                id: `seg-${Date.now()}-after`,
+                                text: after,
+                                claimId: null
+                            });
+                        }
+
+                        // Add any segments that came after
+                        newSegments.push(...prev.slice(i + 1));
+
+                        return newSegments;
+                    }
+                }
+
+                // If claim not found in existing segments, log warning
+                console.log("Claim not found in transcript: ", claimText);
+                return prev;
+             });
+
+          setClaims(prev => [...prev, {
+            id: claimId,
+            text: data.claim,
+            status: 'checking',
+            isTrue: null,
+            explanation: null
+          }]);
+        }
+
+        else if (data.type === 'fact_check') {
+          setClaims(prev => prev.map(c =>
+            c.id === data.id
+            ? { ...c,
+                status: 'complete',
+                isTrue: data.result.isTrue,
+                 explanation: data.result.explanation
+                 }
+            : c
+          ));
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error: ", error);
+        setWsConnected(false);
+      };
+
+      ws.onclose = () => {
+        console.log("WebSocket disconnected.");
+        setWsConnected(false);
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      wsRef.current = ws;
+    } catch (error) {
+      console.error("Failed to connect to WebSocket: ", error);
+    }
+  }
 
   const startRecording = async () => {
-    // if (!wsConnected) {
-    //   alert("WebSocket not connected! Make sure the backend is running.");
-    //   return;
-    // }
+    if (!wsConnected) {
+      alert("WebSocket not connected! Make sure the backend is running.");
+      return;
+    }
 
     try {
       // Request microphone access
@@ -214,12 +181,9 @@ const [selectedClaim, setSelectedClaim] = useState(null);
 
 
       mediaRecorder.ondataavailable = (event) => {
-        // if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-        //   wsRef.current.send(event.data);
-        //   console.log(`Sent audio chunk: ${event.data.size} bytes`);
-        // }
-        if (event.data.size > 0) {
-          console.log(`Captured audio chunk: ${event.data.size} bytes`);
+        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(event.data);
+          console.log(`Sent audio chunk: ${event.data.size} bytes`);
         }
       };
 
@@ -326,15 +290,15 @@ const [selectedClaim, setSelectedClaim] = useState(null);
               variant={isRecording ? 'danger' : 'primary'}
               size='lg'
               onClick={isRecording ? stopRecording : startRecording}
-              // disabled={!wsConnected}
+              disabled={!wsConnected}
               style={{ minWidth: '200px' }}>
                 {isRecording ? 'Stop Recording' : 'Start Recording'}
             </Button>
-            {/* {!wsConnected && (
+            {!wsConnected && (
               <small className='text-danger d-block mt-2'>
                 Backend not connected!
               </small>
-            )} */}
+            )}
           </div>
 
           {/* Live transcript */}
