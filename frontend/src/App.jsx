@@ -12,38 +12,78 @@ const [showModal, setShowModal] = useState(false);
 const [selectedClaim, setSelectedClaim] = useState(null);
 
   // const [transcripts, setTranscripts] = useState([]);
-  const [transcript, setTranscript] = useState(
-    "Today I want to talk about the economy. The unemployment rate is at 3% which is historically low. " +
-    "Water boils at 100 degrees Celsius at sea level. The Earth is flat and this has been proven by many scientists. " +
-    "Climate change is affecting our planet and temperatures have risen by 1.5 degrees globally since pre-industrial times. " +
-    "The population of the United States is over 330 million people. Vaccines cause autism according to recent studies. " +
-    "The Great Wall of China is visible from space with the naked eye. Python is the most popular programming language in 2024."
-  );
+  const [transcriptSegments, setTranscriptSegments] = useState([
+    {
+      id: 'seg-1',
+      text: "Today I want to talk about the economy. The ",
+      claimId: null
+    },
+    {
+      id: 'seg-2',
+      text: "unemployment rate is at 3%",
+      claimId: 'claim-1'
+    },
+    {
+      id: 'seg-3',
+      text: " which is historically low. ",
+      claimId: null
+    },
+    {
+      id: 'seg-4',
+      text: "Water boils at 100 degrees Celsius at sea level",
+      claimId: 'claim-2'
+    },
+    {
+      id: 'seg-5',
+      text: ". ",
+      claimId: null
+    },
+    {
+      id: 'seg-6',
+      text: "The Earth is flat",
+      claimId: 'claim-3'
+    },
+    {
+      id: 'seg-7',
+      text: " and this has been proven by many scientists. Climate change is affecting our planet and ",
+      claimId: null
+    },
+    {
+      id: 'seg-8',
+      text: "temperatures have risen by 1.5 degrees globally",
+      claimId: 'claim-4'
+    },
+    {
+      id: 'seg-9',
+      text: " since pre-industrial times. The population of the United States is over 330 million people. Vaccines cause autism according to recent studies. The Great Wall of China is visible from space with the naked eye. Python is the most popular programming language in 2024.",
+      claimId: null
+    }
+  ]);
 
   const [claims, setClaims] = useState([
     {
-      id: 1,
+      id: 'claim-1',
       text: "unemployment rate is at 3%",
-      status: 'complete', // 'checking' or 'complete'
+      status: 'complete',
       isTrue: true,
       explanation: "According to the U.S. Bureau of Labor Statistics, the unemployment rate was approximately 3.7% in recent months, which is considered historically low and close to the stated 3%."
     },
     {
-      id: 2,
+      id: 'claim-2',
       text: "Water boils at 100 degrees Celsius at sea level",
       status: 'complete',
       isTrue: true,
       explanation: "This is scientifically accurate. At standard atmospheric pressure (sea level), pure water boils at exactly 100°C (212°F)."
     },
     {
-      id: 3,
+      id: 'claim-3',
       text: "The Earth is flat",
       status: 'complete',
       isTrue: false,
       explanation: "This is false. The Earth is an oblate spheroid. This has been proven through satellite imagery, physics, space exploration, and centuries of scientific observation."
     },
     {
-      id: 4,
+      id: 'claim-4',
       text: "temperatures have risen by 1.5 degrees globally",
       status: 'checking',
       isTrue: null,
@@ -81,15 +121,28 @@ const [selectedClaim, setSelectedClaim] = useState(null);
   //       setWsConnected(true);
   //     };
 
+        // ADD SPLITTING FIX HERE
   //     ws.onmessage = (event) => {
   //       const data = JSON.parse(event.data);
   //       console.log("Received from backend: ", data);
 
   //       if (data.type === 'transcript') {
-  //         setTranscript(prev => prev + " " + data.text);
+  //         setTranscriptSegments(prev => [...prev, {
+  //              id: `seg-${Date.now()}`,
+  //              text: data.text,
+  //              claimId: null
+  //        }]);
   //       } else if (data.type === 'claim_detected') {
+            //  const claimId = data.id;
+
+            //  setTranscriptSegments(prev => [...prev, {
+            //   id: `seg-${Date.now()}`,
+            //   text: data.claim,
+            //   claimId: claimId
+            //  }]);
+
   //         setClaims(prev => [...prev, {
-  //           id: data.id,
+  //           id: claimId,
   //           text: data.claim,
   //           status: 'checking',
   //           isTrue: null,
@@ -98,10 +151,14 @@ const [selectedClaim, setSelectedClaim] = useState(null);
   //       }
 
   //       else if (data.type === 'fact_check') {
-  //         setTranscripts(prev => prev.map(t =>
-  //           t.id === data.id
-  //           ? { ...t, status: 'complete', factCheck: data.result }
-  //           : t
+  //         setClaims(prev => prev.map(c =>
+  //           c.id === data.id
+  //           ? { ...c,
+  //               status: 'complete',
+  //               isTrue: data.result.isTrue,
+  //                explanation: data.result.explanation
+  //                }
+  //           : c
   //         ));
   //       }
   //     };
@@ -192,32 +249,44 @@ const [selectedClaim, setSelectedClaim] = useState(null);
     }
   };
 
-  const highlightTranscript = () => {
-    let highlightedText = transcript;
-
-    claims.forEach(claim => {
-      const regex = new RegExp(`(${claim.text})`, 'gi');
-      let colour = '#6c757d';
-
-      if (claim.status === 'complete') {
-        colour = claim.isTrue ? '#198754' : '#dc3545';
+  const renderTranscript = () => {
+    return transcriptSegments.map((segment) => {
+      if (!segment.claimId) {
+        return <span key={segment.id}>{segment.text}</span>;
       }
 
-      highlightedText = highlightedText.replace(
-        regex,
-        `<span style="color: ${colour}; font-weight: 500;>$1</span>`
-      )
-    });
+      const claim = claims.find(c => c.id === segment.claimId);
+      let colour = '#000000';
 
-    return { __html: highlightedText };
-  }
+      if (claim) {
+        if (claim.status === 'checking') {
+          colour = '#6c757d';
+        } else if (claim.status === 'complete') {
+          colour = claim.isTrue ? '#198754' : '#dc3545';
+        }
+      }
+
+      return (
+        <span
+          key={segment.id}
+          style={{
+            color: colour,
+            fontWeight: '500',
+            cursor: claim?.status === 'complete' ? 'pointer' : 'default'
+          }}
+          onClick={() => claim?.status === 'complete' && handleClaimClick(claim)}>
+            {segment.text}
+        </span>
+      );
+    });
+  };
 
   const handleClaimClick = (claim) => {
     if (claim.status === 'complete') {
       setSelectedClaim(claim);
       setShowModal(true);
     }
-  }
+  };
 
   const visualiseAudio = () => {
     if (!analyserReference.current) return;
@@ -275,7 +344,7 @@ const [selectedClaim, setSelectedClaim] = useState(null);
                 Live Transcript
               </h5>
               <div style={{ fontSize: '1.1rem', lineHeight: 1.8 }}>
-                <p dangerouslySetInnerHTML={highlightTranscript()} />
+                <p>{renderTranscript()}</p>
               </div>
             </Card.Body>
           </Card>
@@ -337,15 +406,6 @@ const [selectedClaim, setSelectedClaim] = useState(null);
                             Checking...
                           </small>
                         )}
-                        {claim.status === 'complete' && (
-                          <small style={{
-                            color: claim.isTrue ? '#198754' : '#dc3545',
-                            display: 'block',
-                            marginTop: '8px',
-                            fontWeight: '600'
-                          }}>
-                          </small>
-                        )}
                     </div>
                   ))}
                 </div>
@@ -357,7 +417,7 @@ const [selectedClaim, setSelectedClaim] = useState(null);
 
       {/* Modal for claim explanation */}
       <Modal show={showModal} onHide={() => setShowModal(false)} centered>
-        <Modal.Header>
+        <Modal.Header closeButton>
           <Modal.Title>
             Claim Details
           </Modal.Title>
