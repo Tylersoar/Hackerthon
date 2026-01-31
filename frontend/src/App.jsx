@@ -1,33 +1,53 @@
 import { useEffect, useRef, useState } from 'react'
-import { Container, Button, Card, Badge, ProgressBar, Alert } from 'react-bootstrap'
+import { Container, Button, Card, Row, Modal, Col } from 'react-bootstrap'
 import './App.css'
 import 'bootstrap/dist/css/bootstrap.min.css'
 
 function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [wsConnected, setWsConnected] = useState(false);
+  const [wsConnected, setWsConnected] = useState(true);
+
+const [showModal, setShowModal] = useState(false);
+const [selectedClaim, setSelectedClaim] = useState(null);
+
   // const [transcripts, setTranscripts] = useState([]);
-  const [transcripts, setTranscripts] = useState([
+  const [transcript, setTranscript] = useState(
+    "Today I want to talk about the economy. The unemployment rate is at 3% which is historically low. " +
+    "Water boils at 100 degrees Celsius at sea level. The Earth is flat and this has been proven by many scientists. " +
+    "Climate change is affecting our planet and temperatures have risen by 1.5 degrees globally since pre-industrial times. " +
+    "The population of the United States is over 330 million people. Vaccines cause autism according to recent studies. " +
+    "The Great Wall of China is visible from space with the naked eye. Python is the most popular programming language in 2024."
+  );
+
+  const [claims, setClaims] = useState([
     {
       id: 1,
-      text: "The Earth is flat and has never been proven to be round.",
-      timestamp: "10:23:45",
-      status: 'complete',
-      factCheck: {
-        isTrue: false,
-        explanation: "The Earth is an oblate spheroid, not flat. This has been proven through satellite imagery, circumnavigation, physics, and observations from space. The spherical nature of Earth has been understood since ancient times."
-      }
+      text: "unemployment rate is at 3%",
+      status: 'complete', // 'checking' or 'complete'
+      isTrue: true,
+      explanation: "According to the U.S. Bureau of Labor Statistics, the unemployment rate was approximately 3.7% in recent months, which is considered historically low and close to the stated 3%."
     },
     {
       id: 2,
-      text: "Water boils at 100 degrees Celsius at sea level.",
-      timestamp: "10:24:12",
+      text: "Water boils at 100 degrees Celsius at sea level",
       status: 'complete',
-      factCheck: {
-        isTrue: true,
-        explanation: "This is correct. At standard atmospheric pressure (sea level), pure water boils at exactly 100°C (212°F). This temperature decreases at higher altitudes where atmospheric pressure is lower."
-      }
+      isTrue: true,
+      explanation: "This is scientifically accurate. At standard atmospheric pressure (sea level), pure water boils at exactly 100°C (212°F)."
+    },
+    {
+      id: 3,
+      text: "The Earth is flat",
+      status: 'complete',
+      isTrue: false,
+      explanation: "This is false. The Earth is an oblate spheroid. This has been proven through satellite imagery, physics, space exploration, and centuries of scientific observation."
+    },
+    {
+      id: 4,
+      text: "temperatures have risen by 1.5 degrees globally",
+      status: 'checking',
+      isTrue: null,
+      explanation: null
     }
   ]);
 
@@ -38,7 +58,7 @@ function App() {
   const wsRef = useRef(null);
 
   useEffect(() => {
-    connectWebSocket();
+    // connectWebSocket();
 
     // Cleanup when component unmounts
     return () => {
@@ -46,66 +66,68 @@ function App() {
         cancelAnimationFrame(animationFrameReference.current);
       }
 
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      // if (wsRef.current) {
+      //   wsRef.current.close();
+      // }
     }
   }, []);
 
-  const connectWebSocket = () => {
-    try {
-      const ws = new WebSocket('ws://localhost:8000/ws');
+  // const connectWebSocket = () => {
+  //   try {
+  //     const ws = new WebSocket('ws://localhost:8000/ws');
 
-      ws.onopen = () => {
-        console.log("WebSocket connected!");
-        setWsConnected(true);
-      };
+  //     ws.onopen = () => {
+  //       console.log("WebSocket connected!");
+  //       setWsConnected(true);
+  //     };
 
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        console.log("Received from backend: ", data);
+  //     ws.onmessage = (event) => {
+  //       const data = JSON.parse(event.data);
+  //       console.log("Received from backend: ", data);
 
-        if (data.type === 'transcript') {
-          setTranscripts(prev => [...prev, {
-            id: data.id || Date.now(),
-            text: data.text,
-            timestamp: new Date().toLocaleTimeString(),
-            status: 'checking',
-            factCheck: null
-          }]);
-        }
+  //       if (data.type === 'transcript') {
+  //         setTranscript(prev => prev + " " + data.text);
+  //       } else if (data.type === 'claim_detected') {
+  //         setClaims(prev => [...prev, {
+  //           id: data.id,
+  //           text: data.claim,
+  //           status: 'checking',
+  //           isTrue: null,
+  //           explanation: null
+  //         }]);
+  //       }
 
-        else if (data.type === 'fact_check') {
-          setTranscripts(prev => prev.map(t =>
-            t.id === data.id
-            ? { ...t, status: 'complete', factCheck: data.result }
-            : t
-          ));
-        }
-      };
+  //       else if (data.type === 'fact_check') {
+  //         setTranscripts(prev => prev.map(t =>
+  //           t.id === data.id
+  //           ? { ...t, status: 'complete', factCheck: data.result }
+  //           : t
+  //         ));
+  //       }
+  //     };
 
-      ws.onerror = (error) => {
-        console.error("WebSocket error: ", error);
-        setWsConnected(false);
-      };
+  //     ws.onerror = (error) => {
+  //       console.error("WebSocket error: ", error);
+  //       setWsConnected(false);
+  //     };
 
-      ws.onclose = () => {
-        console.log("WebSocket disconnected.");
-        setWsConnected(false);
-        setTimeout(connectWebSocket, 3000);
-      };
+  //     ws.onclose = () => {
+  //       console.log("WebSocket disconnected.");
+  //       setWsConnected(false);
+  //       setTimeout(connectWebSocket, 3000);
+  //     };
 
-      wsRef.current = ws;
-    } catch (error) {
-      console.error("Failed to connect to WebSocket: ", error);
-    }
-  }
+  //     wsRef.current = ws;
+  //   } catch (error) {
+  //     console.error("Failed to connect to WebSocket: ", error);
+  //   }
+  // }
 
   const startRecording = async () => {
-    if (!wsConnected) {
-      alert("WebSocket not connected! Make sure the backend is running.");
-      return;
-    }
+    // if (!wsConnected) {
+    //   alert("WebSocket not connected! Make sure the backend is running.");
+    //   return;
+    // }
 
     try {
       // Request microphone access
@@ -135,9 +157,12 @@ function App() {
 
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(event.data);
-          console.log(`Sent audio chunk: ${event.data.size} bytes`);
+        // if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+        //   wsRef.current.send(event.data);
+        //   console.log(`Sent audio chunk: ${event.data.size} bytes`);
+        // }
+        if (event.data.size > 0) {
+          console.log(`Captured audio chunk: ${event.data.size} bytes`);
         }
       };
 
@@ -167,6 +192,33 @@ function App() {
     }
   };
 
+  const highlightTranscript = () => {
+    let highlightedText = transcript;
+
+    claims.forEach(claim => {
+      const regex = new RegExp(`(${claim.text})`, 'gi');
+      let colour = '#6c757d';
+
+      if (claim.status === 'complete') {
+        colour = claim.isTrue ? '#198754' : '#dc3545';
+      }
+
+      highlightedText = highlightedText.replace(
+        regex,
+        `<span style="color: ${colour}; font-weight: 500;>$1</span>`
+      )
+    });
+
+    return { __html: highlightedText };
+  }
+
+  const handleClaimClick = (claim) => {
+    if (claim.status === 'complete') {
+      setSelectedClaim(claim);
+      setShowModal(true);
+    }
+  }
+
   const visualiseAudio = () => {
     if (!analyserReference.current) return;
 
@@ -192,112 +244,151 @@ function App() {
   };
 
   return (
-    <Container className='py-5'>
-      <h1 className='text-center mb-4'>
-        TruthStream
-      </h1>
+    <Container fluid style={{ height: '100vh', padding: '20px' }}>
+      <Row style={{ height: '100%' }}>
+        {/* Left-side - main content */}
+        <Col md={8} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <h2 className='mb-4'>
+            TruthStream
+          </h2>
 
-      {!wsConnected && (
-        <Alert variant='warning' className='text-center' style={{ maxWidth: '600px', margin: '0 auto 20px' }}>
-          Backend not connected!
-        </Alert>
-      )}
-
-      <Card style={{ maxWidth: '600px', margin: '0 auto' }}>
-        <Card.Body>
-          <div className='d-flex justify-content-between align-items-center mb-3'>
-            <Badge bg={wsConnected ? 'success' : 'danger'}>
-              {wsConnected ? 'Connected' : 'Disconnected'}
-            </Badge>
-            <Badge bg={isRecording ? 'danger' : 'secondary'} className='fs-6'>
-              {isRecording ? 'Recording!' : 'Stopped'}
-            </Badge>
-          </div>
-
-          {isRecording && (
-            <div className='mb-4'>
-              <small className='text-muted d-block mb-2'>
-                Audio Level: {Math.round(audioLevel)}%
+          <div className='mb-4'>
+            <Button
+              variant={isRecording ? 'danger' : 'primary'}
+              size='lg'
+              onClick={isRecording ? stopRecording : startRecording}
+              // disabled={!wsConnected}
+              style={{ minWidth: '200px' }}>
+                {isRecording ? 'Stop Recording' : 'Start Recording'}
+            </Button>
+            {/* {!wsConnected && (
+              <small className='text-danger d-block mt-2'>
+                Backend not connected!
               </small>
-              <ProgressBar
-                now={audioLevel}
-                variant={audioLevel > 50 ? "danger" : audioLevel > 20 ? "warning" : "success"}
-                style={{ height: '25px' }}
-                animated
-              />
-            </div>
-          )}
-
-          <div className='d-grid gap-2'>
-            {!isRecording ? (
-              <Button
-                variant='primary'
-                size='lg'
-                onClick={startRecording}
-                disabled={!wsConnected}>
-                  Start Recording
-                </Button>
-            ) : (
-              <Button
-                variant='danger'
-                size='lg'
-                onClick={stopRecording}>
-                  Stop Recording
-                </Button>
-            )}
+            )} */}
           </div>
 
-          <div className='mt-3'>
-            <small className='text-muted d-block'>
-              <strong>Audio Format: </strong> audio/webm (Opus codec, 16kHz, mono)
-            </small>
-            <small className='text-muted d-block mt-3'>
-              Check the browser console to see audio chunks being captured!
-            </small>
-          </div>
-        </Card.Body>
-      </Card>
+          {/* Live transcript */}
+          <Card style={{ flex: 1, overflow: 'hidden' }}>
+            <Card.Body style={{ height: '100%', overflow: 'auto' }}>
+              <h5 className='mb-3'>
+                Live Transcript
+              </h5>
+              <div style={{ fontSize: '1.1rem', lineHeight: 1.8 }}>
+                <p dangerouslySetInnerHTML={highlightTranscript()} />
+              </div>
+            </Card.Body>
+          </Card>
+        </Col>
 
-      <Card style={{ maxWidth: '800px', margin: '30px auto' }}>
-        <Card.Body>
-          <h4 className='mb-3'>
-            Live Transcript
-          </h4>
-          {false ? (
-            <p className='text-muted text-center py-4'>
-              Start recording to see transcripts appear here!
-            </p>
-          ) : (
-            <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-              {transcripts.map((t) => (
-                <div key={t.id} className='mb-3 p-3 border-bottom'>
-                      <p className='mb-2' style={{
-                        color: t.status === 'complete' && t.factCheck
-                        ? (t.factCheck.isTrue ? '#198754' : '#dc3545')
-                        : 'inherit',
-                        fontWeight: '500',
-                        fontSize: '1rem'
+        {/* Right side - Claims sidebar */}
+        <Col md={4} style={{
+          height: '100%',
+          borderLeft: '2px solid #dee2e6',
+          paddingLeft: '20px'
+        }}>
+          <Card style={{ height: '100%', border: 'none' }}>
+            <Card.Body style={{ height: '100%', overflow: 'auto' }}>
+              <h5 className='mb-4'>
+                Claims
+              </h5>
+
+              {claims.length === 0 ? (
+                <p className='text-muted'>
+                  No claims detected yet
+                </p>
+              ) : (
+                <div>
+                  {claims.map((claim) => (
+                    <div
+                      key={claim.id}
+                      onClick={() => handleClaimClick(claim)}
+                      style={{
+                        padding: '15px',
+                        marginBottom: '15px',
+                        borderRadius: '8px',
+                        backgroundColor: '#f8f9fa',
+                        border: '1px solid #dee2e6',
+                        cursor: claim.status === 'complete' ? 'pointer' : 'default',
+                        transition: 'all 0.2s'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (claim.status === 'complete') {
+                          e.currentTarget.style.transform = 'translateY(-2px)';
+                          e.currentTarget.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.1)'
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'none';
                       }}>
-                        {t.text}
-                      </p>
-                    <div className='ms-3'>
-                      {t.status === 'checking' && (
-                        <span className='text-muted'>
-                          Checking...
-                        </span>
-                      )}
+                        <p style={{
+                          margin: 0,
+                          color: claim.status === 'checking'
+                          ? '#6c757d'
+                          : (claim.isTrue ? '#198754' : '#dc3545'),
+                          fontWeight: '500',
+                          fontSize: '0.95rem'
+                        }}>
+                          {claim.text}
+                        </p>
+                        {claim.status === 'checking' && (
+                          <small className='text-muted d-block mt-2'>
+                            Checking...
+                          </small>
+                        )}
+                        {claim.status === 'complete' && (
+                          <small style={{
+                            color: claim.isTrue ? '#198754' : '#dc3545',
+                            display: 'block',
+                            marginTop: '8px',
+                            fontWeight: '600'
+                          }}>
+                          </small>
+                        )}
                     </div>
-                  {t.factCheck?.explanation && (
-                    <small className='text-muted d-block mt-2'>
-                      {t.factCheck.explanation}
-                    </small>
-                  )}
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+            </Card.Body>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* Modal for claim explanation */}
+      <Modal show={showModal} onHide={() => setShowModal(false)} centered>
+        <Modal.Header>
+          <Modal.Title>
+            Claim Details
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {selectedClaim && (
+            <>
+              <p style={{
+                color: selectedClaim.isTrue ? '#198754' : '#dc3545',
+                fontWeight: '600',
+                fontSize: '1.1rem',
+                marginBottom: '15px'
+              }}>
+                {selectedClaim.text}
+              </p>
+              <p style={{
+                fontStyle: 'italic',
+                color: '#6c757d',
+                lineHeight: '1.6'
+              }}>
+                {selectedClaim.explanation}
+              </p>
+            </>
           )}
-        </Card.Body>
-      </Card>
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant='secondary' onClick={() => setShowModal(false)}>
+            Close
+          </Button>
+        </Modal.Footer>
+      </Modal>
     </Container>
   )
 }
