@@ -262,7 +262,7 @@ const [selectedClaim, setSelectedClaim] = useState(null);
         if (claim.status === 'checking') {
           colour = '#6c757d';
         } else if (claim.status === 'complete') {
-          colour = claim.isTrue ? '#198754' : '#dc3545';
+          colour = claim.isTrue ? '#10b981' : '#dc3545';
         }
       }
 
@@ -317,9 +317,9 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       <Row style={{ height: '100%' }}>
         {/* Left-side - main content */}
         <Col md={8} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-          <h2 className='mb-4'>
+          <h1 className='mb-4'>
             TruthStream
-          </h2>
+          </h1>
 
           <div className='mb-4'>
             <Button
@@ -338,11 +338,11 @@ const [selectedClaim, setSelectedClaim] = useState(null);
           </div>
 
           {/* Live transcript */}
-          <Card style={{ flex: 1, overflow: 'hidden' }}>
+          <Card style={{ flex: 1, overflow: 'hidden', border: 'none', backgroundColor: 'rgba(0, 0, 0, 256)' }}>
             <Card.Body style={{ height: '100%', overflow: 'auto' }}>
-              <h5 className='mb-3'>
+              <h2 className='mb-3'>
                 Live Transcript
-              </h5>
+              </h2>
               <div style={{ fontSize: '1.1rem', lineHeight: 1.8 }}>
                 <p>{renderTranscript()}</p>
               </div>
@@ -353,14 +353,13 @@ const [selectedClaim, setSelectedClaim] = useState(null);
         {/* Right side - Claims sidebar */}
         <Col md={4} style={{
           height: '100%',
-          borderLeft: '2px solid #dee2e6',
           paddingLeft: '20px'
         }}>
-          <Card style={{ height: '100%', border: 'none' }}>
+          <Card style={{ height: '100%', border: 'none', backgroundColor: 'rgba(0, 0, 0, 256)' }}>
             <Card.Body style={{ height: '100%', overflow: 'auto' }}>
-              <h5 className='mb-4'>
+              <h3 className='mb-4'>
                 Claims
-              </h5>
+              </h3>
 
               {claims.length === 0 ? (
                 <p className='text-muted'>
@@ -370,13 +369,14 @@ const [selectedClaim, setSelectedClaim] = useState(null);
                 <div>
                   {claims.map((claim) => (
                     <div
+                      className='bounce-in'
                       key={claim.id}
                       onClick={() => handleClaimClick(claim)}
                       style={{
                         padding: '15px',
                         marginBottom: '15px',
                         borderRadius: '8px',
-                        backgroundColor: '#f8f9fa',
+                        backgroundColor: 'rgba(0, 0, 0, 256)',
                         border: '1px solid #dee2e6',
                         cursor: claim.status === 'complete' ? 'pointer' : 'default',
                         transition: 'all 0.2s'
@@ -395,15 +395,15 @@ const [selectedClaim, setSelectedClaim] = useState(null);
                           margin: 0,
                           color: claim.status === 'checking'
                           ? '#6c757d'
-                          : (claim.isTrue ? '#198754' : '#dc3545'),
+                          : (claim.isTrue ? '#10b981' : '#dc3545'),
                           fontWeight: '500',
                           fontSize: '0.95rem'
                         }}>
                           {claim.text}
                         </p>
                         {claim.status === 'checking' && (
-                          <small className='text-muted d-block mt-2'>
-                            Checking...
+                          <small className='d-block mt-2'>
+                            ⏳ Checking...
                           </small>
                         )}
                     </div>
@@ -426,7 +426,7 @@ const [selectedClaim, setSelectedClaim] = useState(null);
           {selectedClaim && (
             <>
               <p style={{
-                color: selectedClaim.isTrue ? '#198754' : '#dc3545',
+                color: selectedClaim.isTrue ? '#10b981' : '#dc3545',
                 fontWeight: '600',
                 fontSize: '1.1rem',
                 marginBottom: '15px'
@@ -443,11 +443,6 @@ const [selectedClaim, setSelectedClaim] = useState(null);
             </>
           )}
         </Modal.Body>
-        <Modal.Footer>
-          <Button variant='secondary' onClick={() => setShowModal(false)}>
-            Close
-          </Button>
-        </Modal.Footer>
       </Modal>
     </Container>
   )
