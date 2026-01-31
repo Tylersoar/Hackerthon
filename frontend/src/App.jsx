@@ -179,6 +179,14 @@ const [selectedClaim, setSelectedClaim] = useState(null);
         audioBitsPerSecond: 16000
       });
 
+      const sessionId = `${Date.now()}-${Math.random()}`;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          id: sessionId
+        }));
+        console.log(`Sent ID: `, sessionId);
+      }
+
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
