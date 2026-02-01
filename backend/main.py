@@ -1,6 +1,10 @@
+import asyncio
 import os
 import json
-from deepgram import DeepgramClient
+import uuid
+
+from fastapi import FastAPI, WebSocket
+from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 from dotenv import load_dotenv
 import logic  # We import the file we just made
 
@@ -11,6 +15,74 @@ if not DEEPGRAM_API_KEY:
     raise RuntimeError("Missing API keys")
 
 deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
+app = FastAPI()
+
+async def handle_sentence(text, sentence_id, user_socket):
+
+    # Claim detection
+    claim_text = await logic.extract_claim(text)
+
+    if claim_text:
+        # Immediately inform frontend
+        await user_socket.send_json({
+            "type": "claim_detected",
+            "id": sentence_id,
+            "claim": claim_text
+
+        })
+
+        # Verification
+        verdict = await logic.verify_claim(claim_text)
+
+        # Final result: give to frontend
+        await user_socket.send_json({
+            "type": "fact_check",
+            "id": sentence_id,
+            "result": {
+                "isTrue": verdict["isTrue"],
+                "explanation": verdict["explanation"]
+            }
+        })
+
+# --- THE MAIN LOOP ---
+@app.websocket("/ws")
+async def websocket_endpoint(user_socket : WebSocket) :
+    await user_socket.accept()
+
+    dg_connection = deepgram_client.listen.live.v("1")
+
+    options = LiveOptions(
+        model="nova-3",          # Upgrade to latest model
+        smart_format=True,       # Critical for correct punctuation/formatting
+        endpointing=500,         # Wait 500ms silence before finalizing (better context)
+        punctuate=True,          # (Redundant with smart_format but good to keep)
+        language="en-US",
+        encoding="linear16",
+        channels=1,
+        sample_rate=16000,
+    )
+
+    await dg_connection.start(options, keepalive=True)
+
+    async def on_transcript(result):
+        text = result.transcript
+
+        # Generate ID
+        sent_id = str(uuid.uuid4())
+
+        # Message 1: transcript, always sent
+        await user_socket.send_json(
+            {
+                "type": "transcript",
+                "text": text
+            }
+
+        )
+
+        if result.is_final:
+            asyncio.create_task(handle_sentence(text, sent_id, user_socket))
+
+
 
 file_path = "../res/polarBear.mp3"
 
