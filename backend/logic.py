@@ -1,180 +1,228 @@
+"""
+Logic layer for fact-checking.
+
+This module provides two async functions used by the WebSocket pipeline in
+backend/main.py:
+
+- `extract_claim(text)` — asks an LLM if a sentence is a verifiable factual claim.
+- `verify_claim(claim_text)` — searches the web for evidence and asks an LLM to
+  evaluate the claim against that evidence, returning a boolean verdict and
+  short explanation.
+
+Design notes:
+- Simple timestamped `print()`-based logging via `dprint()` (no logging
+  framework) to keep developer visibility easy during hacking.
+- External services: Groq (LLM) and Tavily (search). API keys are loaded from
+  the environment using `python-dotenv`.
+- Blocking SDK calls are executed in a thread via `asyncio.to_thread(...)` so
+  the async event loop remains responsive.
+"""
+
 import os
 import asyncio
 import json
 import uuid
+import time
+from datetime import datetime
 from groq import Groq
 from tavily import TavilyClient
 from dotenv import load_dotenv
+from typing import Any, Dict, List, Optional
 
 load_dotenv()
 
-# Initialize clients exactly as you had them
+def _ts() -> str:
+    """Return a compact ISO timestamp (to the second) for log lines."""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def dprint(component: str, message: str) -> None:
+    """Lightweight, standardized debug print.
+
+    Format: `[YYYY-MM-DDTHH:MM:SS] [COMPONENT] message`
+
+    Example:
+        dprint("LOGIC", "Starting claim extraction")
+    """
+    print(f"[{_ts()}] [{component}] {message}")
+
+
+# Initialize external clients once at import time.
+# NOTE: These SDKs are synchronous. We call them inside `asyncio.to_thread` to
+# avoid blocking the event loop.
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
-# def process_sentence_logic(sentence):
-#     """
-#     Runs the exact Claim Check -> Tavily -> Fact Check flow from your original script.
-#     """
-#     # 1. Check if sentence contains a claim
-#     completion = groq_client.chat.completions.create(
-#         model="llama-3.3-70b-versatile",
-#         messages=[
-#             {
-#                 "role": "system",
-#                 "content": "Respond with only 'YES' or 'NO': Is this a verifiable factual claim?"
-#             },
-#             {
-#                 "role": "user",
-#                 "content": sentence
-#             }
-#         ],
-#         temperature=0.1,
-#         max_tokens=10
-#     )
-#
-#     is_claim = completion.choices[0].message.content.strip().upper()
-#
-#     if is_claim != "YES":
-#         return None
-#
-#     # Generate unique ID for this claim
-#     claim_id = str(uuid.uuid4())
-#
-#     # 2. Search with Tavily
-#     search_response = tavily_client.search(
-#         query=sentence,
-#         search_depth="advanced",
-#         max_results=3
-#     )
-#
-#     evidence = []
-#     sources = []
-#     for result in search_response.get('results', []):
-#         content = result.get('content', '')
-#         url = result.get('url', '')
-#         if content:
-#             evidence.append(content)
-#             sources.append(url)
-#
-#     # 3. Analyze with Groq
-#     evidence_text = "\n\n".join([f"Source {i + 1}: {ev}" for i, ev in enumerate(evidence)])
-#
-#     analysis_completion = groq_client.chat.completions.create(
-#         model="llama-3.3-70b-versatile",
-#         messages=[
-#             {
-#                 "role": "system",
-#                 "content": """You are a fact-checker. Analyze the claim against the evidence provided.
-#
-# Respond ONLY with valid JSON in this exact format:
-# {
-#     "isTrue": true or false,
-#     "explanation": "Brief explanation why the claim is true/false based on evidence"
-# }"""
-#             },
-#             {
-#                 "role": "user",
-#                 "content": f"Claim: {sentence}\n\nEvidence:\n{evidence_text}\n\nAnalyze this claim."
-#             }
-#         ],
-#         temperature=0.2,
-#         max_tokens=300
-#     )
-#
-#     # Parse the analysis
-#     try:
-#         analysis = json.loads(analysis_completion.choices[0].message.content.strip())
-#     except json.JSONDecodeError:
-#         analysis = {
-#             "isTrue": False,
-#             "explanation": "Unable to parse analysis"
-#         }
-#
-#     # Return everything needed for the message
-#     return {
-#         "id": claim_id,
-#         "claim": sentence,
-#         "evidence": evidence,
-#         "result": analysis
-#     }
+async def extract_claim(text: str) -> Optional[str]:
+    """Return the input `text` if it contains a verifiable factual claim.
 
-# ------- LEGACY ABOVE ------
+    This function delegates to a small Groq prompt that must respond strictly
+    with "YES" or "NO". A "YES" means the sentence should be fact-checked;
+    in that case we return the original `text`. A "NO" results in `None`.
 
-async def extract_claim(text):
+    Parameters:
+        text: Transcribed sentence to check.
 
-    completion = await asyncio.to_thread(
-        groq_client.chat.completions.create,
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "Respond with only 'YES' or 'NO': Is this a verifiable factual claim?"},
-            {"role": "user", "content": text}
-        ],
-        temperature=0.1,
-        max_tokens=10
-    )
+    Returns:
+        The same `text` when a claim is detected; otherwise `None`.
 
-    is_claim = completion.choices[0].message.content.strip().upper()
+    Logging:
+        Emits timing of the LLM call and the YES/NO result via `dprint`.
+    """
+    dprint("LOGIC", f"🕵️ Checking if claim: '{text[:50]}...'")
+    try:
+        t0 = time.monotonic()
+        # IMPORTANT: Groq SDK is synchronous; run in a worker thread.
+        completion = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a claim detection engine. Determine if the user's text contains a "Verifiable Factual Claim".
+        Respond with ONLY "YES" or "NO".
 
-    if is_claim != "YES":
+        Criteria for "YES":
+        1. The statement contains specific data, statistics, or numbers (e.g., "Inflation is 10%").
+        2. It asserts a specific event or action.
+        3. It can be proven True or False using objective evidence.
+        4. It makes a definitive statement about the world, history, or current events.
+
+        Criteria for "NO":
+        1. Pure opinions ("I think...", "In my opinion").
+        2. Future predictions ("It will rain tomorrow").
+        3. Vague generalizations ("Life is hard").
+        4. Questions or commands.
+
+        If the text contains a specific statistic, ALWAYS respond YES.
+        If the text makes a definitive statement about reality (e.g. "The sky is blue", "Paris is in France"), respond YES."""
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            temperature=0.0,  # Keep temp low for consistent classification
+            max_tokens=5
+        )
+
+        is_claim = completion.choices[0].message.content.strip().upper()
+        dprint("LOGIC", f"🕵️ Is Claim? {is_claim} (took {time.monotonic() - t0:.2f}s)")
+
+        if "YES" in is_claim:
+            return text
+
+        return None
+    except Exception as e:
+        dprint("LOGIC", f"❌ Error in extract_claim: {e}")
         return None
 
-    return text
+async def verify_claim(claim_text: str) -> Dict[str, Any]:
+    """Verify a factual claim using Tavily search + Groq analysis.
 
-async def verify_claim(claim_text):
-    search_response = await asyncio.to_thread(
-        tavily_client.search,
-        query=claim_text,
-        search_depth="advanced",
-        max_results=3
-    )
+    Steps:
+      1. Use Tavily to find a few high-signal sources for the claim.
+      2. Concatenate the evidence and ask Groq for a JSON-only verdict
+         in the shape: `{ "isTrue": bool, "explanation": str }`.
 
-    evidence = []
-    sources = []
-    for result in search_response.get('results', []):
-        content = result.get('content', '')
-        url = result.get('url', '')
-        if content:
-            evidence.append(content)
-            sources.append(url)
+    Parameters:
+        claim_text: The claim string previously returned by `extract_claim`.
 
-    evidence_text = "\n\n".join([f"Source {i + 1}: {ev}" for i, ev in enumerate(evidence)])
-
-    analysis_completion = await asyncio.to_thread(
-        groq_client.chat.completions.create,
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a fact-checker. Analyze the claim against the evidence provided.\n\n"
-                    "Respond ONLY with valid JSON in this exact format:\n"
-                    "{\n"
-                    "    \"isTrue\": true or false,\n"
-                    "    \"explanation\": \"Brief explanation why the claim is true/false based on evidence\"\n"
-                    "}"
-                )
-            },
-            {
-                "role": "user",
-                "content": f"Claim: {claim_text}\n\nEvidence:\n{evidence_text}\n\nAnalyze this claim."
-            }
-        ],
-        temperature=0.2,
-        max_tokens=300
-    )
-
-    # Parse the analysis
-    try:
-        analysis = json.loads(analysis_completion.choices[0].message.content.strip())
-    except json.JSONDecodeError:
-        analysis = {
-            "isTrue": False,
-            "explanation": "Unable to parse analysis"
+    Returns:
+        A dictionary with the following structure:
+        {
+          "claim": str,
+          "evidence": List[str],  # raw snippets from Tavily results
+          "result": {
+            "isTrue": bool,
+            "explanation": str
+          }
         }
 
-    return {
-        "claim": claim_text,
-        "evidence": evidence,
-        "result": analysis
-    }
+    Logging:
+        Emits timings for Tavily and Groq calls, number of sources found,
+        a preview of source URLs, and JSON-parse errors when applicable.
+    """
+    dprint("LOGIC", f"🌍 Searching Tavily for: '{claim_text[:50]}...'")
+    try:
+        t_search = time.monotonic()
+        # Tavily client is synchronous; run it in a worker thread.
+        search_response = await asyncio.to_thread(
+            tavily_client.search,
+            query=claim_text,
+            search_depth="advanced",
+            max_results=3
+        )
+        dprint("LOGIC", f"🌍 Tavily search completed in {time.monotonic() - t_search:.2f}s")
+
+        # Normalize search results into `evidence` (content) and `sources` (urls)
+        evidence: List[str] = []
+        sources: List[str] = []
+        for result in search_response.get('results', []):
+            content = result.get('content', '')
+            url = result.get('url', '')
+            if content:
+                evidence.append(content)
+                sources.append(url)
+        
+        dprint("LOGIC", f"🌍 Found {len(evidence)} sources")
+        if sources:
+            preview_urls = ", ".join(sources[:2]) + (" ..." if len(sources) > 2 else "")
+            dprint("LOGIC", f"🔗 Sources: {preview_urls}")
+
+        # Build a compact evidence block for the LLM to reason over.
+        evidence_text = "\n\n".join([f"Source {i + 1}: {ev}" for i, ev in enumerate(evidence)])
+
+        dprint("LOGIC", f"🧠 Analyzing with Groq...")
+        t_analyze = time.monotonic()
+        # Ask Groq to return JSON only; we still guard with a parser fallback.
+        analysis_completion = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a fact-checker. Analyze the claim against the evidence provided.\n\n"
+                        "Respond ONLY with valid JSON in this exact format:\n"
+                        "{\n"
+                        "    \"isTrue\": true or false,\n"
+                        "    \"explanation\": \"Brief explanation why the claim is true/false based on evidence\"\n"
+                        "}"
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Claim: {claim_text}\n\nEvidence:\n{evidence_text}\n\nAnalyze this claim."
+                }
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        dprint("LOGIC", f"🧠 Analysis model call took {time.monotonic() - t_analyze:.2f}s")
+
+        # Parse the analysis
+        try:
+            # Some models may accidentally include backticks or extra text.
+            # We defensively strip whitespace and attempt JSON parsing.
+            analysis = json.loads(analysis_completion.choices[0].message.content.strip())
+            dprint("LOGIC", f"🧠 Analysis complete: {analysis.get('isTrue')}")
+        except json.JSONDecodeError:
+            dprint("LOGIC", f"❌ JSON Parse Error")
+            analysis = {
+                "isTrue": False,
+                "explanation": "Unable to parse analysis"
+            }
+
+        return {
+            "claim": claim_text,
+            "evidence": evidence,
+            "result": analysis
+        }
+    except Exception as e:
+        dprint("LOGIC", f"❌ Error in verify_claim: {e}")
+        return {
+            "claim": claim_text,
+            "evidence": [],
+            "result": {"isTrue": False, "explanation": f"Error: {str(e)}"}
+        }
