@@ -18,27 +18,53 @@ const [selectedClaim, setSelectedClaim] = useState(null);
   const mediaRecorderReference = useRef(null);
   const audioContextReference = useRef(null);
   const analyserReference = useRef(null);
+  const sourceNodeRef = useRef(null);
+  const processorNodeRef = useRef(null);
+  const mediaStreamRef = useRef(null);
   const animationFrameReference = useRef(null);
   const wsRef = useRef(null);
+  // Guard and reconnection controls
+  const reconnectTimerRef = useRef(null);
+  const shouldReconnectRef = useRef(true);
 
   useEffect(() => {
+    // allow reconnects while mounted
+    shouldReconnectRef.current = true;
     connectWebSocket();
 
     // Cleanup when component unmounts
     return () => {
+      // prevent auto-reconnects after unmount
+      shouldReconnectRef.current = false;
+
+      // clear any pending reconnect timer
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+
       if (animationFrameReference.current) {
         cancelAnimationFrame(animationFrameReference.current);
       }
 
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
     }
   }, []);
 
   const connectWebSocket = () => {
     try {
+      // Guard: avoid opening a second socket if one is open or connecting
+      if (wsRef.current && [WebSocket.OPEN, WebSocket.CONNECTING].includes(wsRef.current.readyState)) {
+        console.log("WebSocket is already open or connecting. Skipping new connection.");
+        return;
+      }
+
       const ws = new WebSocket('ws://localhost:8000/ws');
+      // Assign immediately to avoid race conditions with onclose/onerror
+      wsRef.current = ws;
 
       ws.onopen = () => {
         console.log("WebSocket connected!");
@@ -138,14 +164,65 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       ws.onclose = () => {
         console.log("WebSocket disconnected.");
         setWsConnected(false);
-        setTimeout(connectWebSocket, 3000);
+        // Auto-reconnect with guard to avoid duplicates
+        if (!shouldReconnectRef.current) {
+          return;
+        }
+
+        // If there's already an open/connecting socket, don't schedule another
+        if (wsRef.current && [WebSocket.OPEN, WebSocket.CONNECTING].includes(wsRef.current.readyState)) {
+          return;
+        }
+
+        // Ensure only one reconnect timer is pending
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+        }
+
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          connectWebSocket();
+        }, 3000);
       };
 
-      wsRef.current = ws;
     } catch (error) {
       console.error("Failed to connect to WebSocket: ", error);
     }
   }
+
+  // Helpers for PCM streaming (16kHz mono Linear16)
+  const downsampleBuffer = (buffer, inputSampleRate, outSampleRate) => {
+    if (outSampleRate === inputSampleRate) {
+      return buffer;
+    }
+    const sampleRateRatio = inputSampleRate / outSampleRate;
+    const newLength = Math.round(buffer.length / sampleRateRatio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+      let accum = 0, count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = count > 0 ? accum / count : 0;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  };
+
+  const floatTo16BitPCM = (float32Array) => {
+    const len = float32Array.length;
+    const result = new Int16Array(len);
+    for (let i = 0; i < len; i++) {
+      const s = Math.max(-1, Math.min(1, float32Array[i]));
+      result[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return result.buffer;
+  };
 
   const startRecording = async () => {
     if (!wsConnected) {
@@ -158,48 +235,46 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 16000,
+          sampleRate: 48000,
           echoCancellation: true,
           noiseSuppression: true
         }
       });
 
-      // Setup audio visualisation
-      audioContextReference.current = new AudioContext();
-      analyserReference.current = audioContextReference.current.createAnalyser();
-      const source = audioContextReference.current.createMediaStreamSource(stream);
-      source.connect(analyserReference.current);
+      mediaStreamRef.current = stream;
+      // Setup WebAudio graph
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioContextReference.current = new AudioCtx();
+      const ac = audioContextReference.current;
+
+      // Visualizer
+      analyserReference.current = ac.createAnalyser();
       analyserReference.current.fftSize = 2048;
       analyserReference.current.smoothingTimeConstant = 0.3;
-      visualiseAudio();
 
-      // Create MediaRecorder with WebM format
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-        audioBitsPerSecond: 16000
-      });
+      // Source from mic
+      sourceNodeRef.current = ac.createMediaStreamSource(stream);
+      sourceNodeRef.current.connect(analyserReference.current);
 
-      const sessionId = `${Date.now()}-${Math.random()}`;
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          id: sessionId
-        }));
-        console.log(`Sent ID: `, sessionId);
-      }
-
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(event.data);
-          console.log(`Sent audio chunk: ${event.data.size} bytes`);
-        }
+      // Processor to capture PCM frames
+      processorNodeRef.current = ac.createScriptProcessor(4096, 1, 1);
+      processorNodeRef.current.onaudioprocess = (event) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        const input = event.inputBuffer.getChannelData(0);
+        // Downsample to 16kHz mono
+        const downsampled = downsampleBuffer(input, ac.sampleRate, 16000);
+        const pcm16 = floatTo16BitPCM(downsampled);
+        wsRef.current.send(pcm16);
       };
 
-      mediaRecorder.start(250);
-      mediaRecorderReference.current = mediaRecorder;
+      // Important: connect to destination so processor runs; output is silence
+      sourceNodeRef.current.connect(processorNodeRef.current);
+      processorNodeRef.current.connect(ac.destination);
+
+      visualiseAudio();
       setIsRecording(true);
 
-      console.log("Recording started; audio format: ", mediaRecorder.mimeType);
+      console.log("Recording started; streaming PCM16 @16kHz over WebSocket. Input sampleRate=", audioContextReference.current.sampleRate);
     } catch (error) {
     console.error("Error accessing microphone: ", error);
     alert("Could not access microphone, please check permissions.");
@@ -207,17 +282,38 @@ const [selectedClaim, setSelectedClaim] = useState(null);
   };
 
   const stopRecording = () => {
-    if (mediaRecorderReference.current && mediaRecorderReference.current.state !== 'inactive') {
-      mediaRecorderReference.current.stop();
-      mediaRecorderReference.current.stream.getTracks().forEach(track => track.stop());
-      setIsRecording(false);
-      setAudioLevel(0);
-
-      if (animationFrameReference.current) {
-        cancelAnimationFrame(animationFrameReference.current);
+    try {
+      if (processorNodeRef.current) {
+        processorNodeRef.current.disconnect();
+        processorNodeRef.current.onaudioprocess = null;
+        processorNodeRef.current = null;
+      }
+      if (sourceNodeRef.current) {
+        sourceNodeRef.current.disconnect();
+        sourceNodeRef.current = null;
+      }
+      if (analyserReference.current) {
+        // no explicit disconnect needed if source disconnected
+      }
+      if (audioContextReference.current) {
+        // Safari may not support close; wrap in try
+        try { audioContextReference.current.close(); } catch (e) {}
+        audioContextReference.current = null;
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(t => t.stop());
+        mediaStreamRef.current = null;
       }
 
+      setIsRecording(false);
+      setAudioLevel(0);
+      if (animationFrameReference.current) {
+        cancelAnimationFrame(animationFrameReference.current);
+        animationFrameReference.current = null;
+      }
       console.log("Recording stopped");
+    } catch (e) {
+      console.error("Error while stopping recording", e);
     }
   };
 
