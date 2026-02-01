@@ -79,14 +79,17 @@ async def extract_claim(text: str) -> Optional[str]:
             messages=[
                 {
                     "role": "system",
-                    "content": """You are a claim detection engine. Determine if the user's text contains a "Verifiable Factual Claim".
+                    "content": """You are a claim detection engine analyzing a live audio stream.
+        The input text is a rolling buffer of the last few sentences spoken.
+        Determine if the text *contains* a "Verifiable Factual Claim" that has just been completed.
+
         Respond with ONLY "YES" or "NO".
 
         Criteria for "YES":
         1. The statement contains specific data, statistics, or numbers (e.g., "Inflation is 10%").
-        2. It asserts a specific event or action.
-        3. It can be proven True or False using objective evidence.
-        4. It makes a definitive statement about the world, history, or current events.
+        2. It asserts a specific event, action, or historical fact.
+        3. It makes a definitive statement about reality (e.g., "Paris is in France").
+        4. Important: If the start of the text is old context, but the *end* of the text completes a new claim, respond YES.
 
         Criteria for "NO":
         1. Pure opinions ("I think...", "In my opinion").
@@ -94,16 +97,15 @@ async def extract_claim(text: str) -> Optional[str]:
         3. Vague generalizations ("Life is hard").
         4. Questions or commands.
 
-        If the text contains a specific statistic, ALWAYS respond YES.
-        If the text makes a definitive statement about reality (e.g. "The sky is blue", "Paris is in France"), respond YES."""
+        If the text contains a specific statistic, ALWAYS respond YES."""
                 },
                 {
                     "role": "user",
                     "content": text
                 }
             ],
-            temperature=0.0,  # Keep temp low for consistent classification
-            max_tokens=5
+            temperature=0.0,
+            max_tokens=10  # Increased slightly to allow for "YES" with potential whitespace
         )
 
         is_claim = completion.choices[0].message.content.strip().upper()

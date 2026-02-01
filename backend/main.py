@@ -10,6 +10,7 @@ import asyncio
 import os
 import uuid
 import time
+from collections import deque
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket
@@ -36,7 +37,7 @@ def _ts():
 def dprint(component, message):
     print(f"[{_ts()}] [{component}] {message}")
 
-async def handle_sentence(text, sentence_id, user_socket):
+async def handle_sentence(full_context, text, sentence_id, user_socket):
     """
     Processes a finalized sentence to detect and verify claims.
 
@@ -48,7 +49,7 @@ async def handle_sentence(text, sentence_id, user_socket):
 
     # Step 1: Use LLM to determine if the sentence contains a verifiable claim
     start_claim = time.monotonic()
-    claim_text = await logic.extract_claim(text)
+    claim_text = await logic.extract_claim(full_context)
     dprint(
         "HANDLE",
         f"extract_claim completed in {time.monotonic() - start_claim:.2f}s; has_claim={'YES' if claim_text else 'NO'}",
@@ -60,13 +61,13 @@ async def handle_sentence(text, sentence_id, user_socket):
         await user_socket.send_json({
             "type": "claim_detected",
             "id": sentence_id,
-            "claim": claim_text
+            "claim": text
 
         })
 
         # Step 3: Perform RAG/Search to verify the claim against reliable sources
         start_verify = time.monotonic()
-        verdict = await logic.verify_claim(claim_text)
+        verdict = await logic.verify_claim(full_context)
         dprint("HANDLE", f"verify_claim completed in {time.monotonic() - start_verify:.2f}s")
 
         # Step 4: Push the final verdict and explanation to the UI
@@ -91,6 +92,11 @@ async def websocket_endpoint(user_socket : WebSocket) :
     await user_socket.accept()
     dprint("WS", "WebSocket connection accepted")
 
+    context_buffer = deque(maxlen=3)
+
+    # Unique ID allows the frontend to link transcripts to future fact-check results
+    current_sentence_id = str(uuid.uuid4())
+
     # Initialize a persistent connection to Deepgram's streaming API
     dg_connection = deepgram_client.listen.asyncwebsocket.v("1")
 
@@ -114,6 +120,8 @@ async def websocket_endpoint(user_socket : WebSocket) :
         """
         Event handler: Runs whenever Deepgram processes a chunk of audio.
         """
+        nonlocal current_sentence_id
+
         try:
             dprint("DG", "on_transcript event received")
 
@@ -138,24 +146,28 @@ async def websocket_endpoint(user_socket : WebSocket) :
             if not sentence:
                 return
 
-            # Unique ID allows the frontend to link transcripts to future fact-check results
-            sent_id = str(uuid.uuid4())
-
             # Send interim or final text to frontend for real-time captions
             preview = (sentence[:60] + "...") if len(sentence) > 60 else sentence
-            dprint("DG", f"Sending transcript id={sent_id} is_final={is_final} text='{preview}'")
+            dprint("DG", f"Sending transcript id={current_sentence_id} is_final={is_final} text='{preview}'")
             await user_socket.send_json(
                 {
                     "type": "transcript",
                     "text": sentence,
-                    "id": sent_id,
+                    "id": current_sentence_id
                 }
             )
 
             if is_final:
+                # Append sentence to context
+                context_buffer.append(sentence)
+
+                full_context = " ".join(context_buffer)
+
                 # If Deepgram marks the sentence as finished, start the background fact-check
-                dprint("DG", f"Scheduling handle_sentence for id={sent_id}")
-                asyncio.create_task(handle_sentence(sentence, sent_id, user_socket))
+                dprint("DG", f"Scheduling handle_sentence for id={current_sentence_id}")
+                asyncio.create_task(handle_sentence(full_context, sentence, current_sentence_id, user_socket))
+
+                current_sentence_id = str(uuid.uuid4())
         except Exception as e:
             dprint("DG", f"on_transcript error: {e}")
 
