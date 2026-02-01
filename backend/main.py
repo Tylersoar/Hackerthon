@@ -3,7 +3,8 @@ import os
 import uuid
 
 from fastapi import FastAPI, WebSocket
-from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
+from deepgram import DeepgramClient
+from deepgram.clients.live.v1 import LiveTranscriptionEvents, LiveOptions
 from dotenv import load_dotenv
 import logic  # We import the file we just made
 
@@ -56,12 +57,10 @@ async def websocket_endpoint(user_socket : WebSocket) :
         endpointing=500,         # Wait 500ms silence before finalizing (better context)
         punctuate=True,          # (Redundant with smart_format but good to keep)
         language="en-US",
-        encoding="linear16",
-        channels=1,
-        sample_rate=16000,
     )
 
     async def on_transcript(self, result, **kwargs):
+        print("Running on_transcript")
         sentence = result.channel.alternatives[0].transcript
 
         if len(sentence) == 0:
@@ -71,6 +70,7 @@ async def websocket_endpoint(user_socket : WebSocket) :
         sent_id = str(uuid.uuid4())
 
         # Message 1: transcript, always sent
+        print("Sending transcript to frontend")
         await user_socket.send_json(
             {
                 "type": "transcript",
@@ -91,9 +91,11 @@ async def websocket_endpoint(user_socket : WebSocket) :
     try:
         while True:
             # Wait for audio from frontend
+            print("Waiting for audio...")
             data = await user_socket.receive_bytes()
 
             # Push bytes to deepgram
+            print("Pushing audio to deepgram...")
             await dg_connection.send(data)
 
     except Exception as e:
