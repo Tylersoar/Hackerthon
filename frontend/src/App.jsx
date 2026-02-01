@@ -6,6 +6,7 @@ import 'bootstrap/dist/css/bootstrap.min.css'
 function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
 
 const [showModal, setShowModal] = useState(false);
@@ -20,6 +21,7 @@ const [selectedClaim, setSelectedClaim] = useState(null);
   const analyserReference = useRef(null);
   const animationFrameReference = useRef(null);
   const wsRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     connectWebSocket();
@@ -128,6 +130,10 @@ const [selectedClaim, setSelectedClaim] = useState(null);
             : c
           ));
         }
+        else if (data.type === 'processing_complete') {
+          setIsProcessing(false);
+          console.log("✅ Processing complete");
+        }
       };
 
       ws.onerror = (error) => {
@@ -152,6 +158,10 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       alert("WebSocket not connected! Make sure the backend is running.");
       return;
     }
+
+    // Clear previous transcript and claims
+    setTranscriptSegments([]);
+    setClaims([]);
 
     try {
       // Request microphone access
@@ -182,16 +192,16 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       const sessionId = `${Date.now()}-${Math.random()}`;
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
+          type: 'start_recording',
           id: sessionId
         }));
-        console.log(`Sent ID: `, sessionId);
+        console.log(`🎤 Sent session ID: `, sessionId);
       }
-
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(event.data);
-          console.log(`Sent audio chunk: ${event.data.size} bytes`);
+          console.log(`📤 Sent audio chunk: ${event.data.size} bytes`);
         }
       };
 
@@ -199,10 +209,68 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       mediaRecorderReference.current = mediaRecorder;
       setIsRecording(true);
 
-      console.log("Recording started; audio format: ", mediaRecorder.mimeType);
+      console.log("🎤 Recording started; audio format: ", mediaRecorder.mimeType);
     } catch (error) {
-    console.error("Error accessing microphone: ", error);
-    alert("Could not access microphone, please check permissions.");
+      console.error("❌ Error accessing microphone: ", error);
+      alert("Could not access microphone, please check permissions.");
+    }
+  };
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!wsConnected) {
+      alert("WebSocket not connected! Make sure the backend is running.");
+      return;
+    }
+
+    // Check if it's an audio file
+    if (!file.type.startsWith('audio/')) {
+      alert("Please upload an audio file.");
+      return;
+    }
+
+    setIsProcessing(true);
+    setTranscriptSegments([]);
+    setClaims([]);
+
+    try {
+      // Send session ID
+      const sessionId = `${Date.now()}-${Math.random()}`;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'upload_file',
+          id: sessionId
+        }));
+        console.log(`📤 Sent session ID: `, sessionId);
+      }
+
+      // Read and send file in chunks
+      const chunkSize = 8192; // 8KB chunks
+      let offset = 0;
+
+      while (offset < file.size) {
+        const chunk = file.slice(offset, offset + chunkSize);
+        const arrayBuffer = await chunk.arrayBuffer();
+        
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(arrayBuffer);
+          console.log(`📤 Sent audio chunk: ${arrayBuffer.byteLength} bytes (${offset + arrayBuffer.byteLength}/${file.size})`);
+        }
+        
+        offset += chunkSize;
+        
+        // Small delay to avoid overwhelming the connection
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+
+      console.log(`✅ Finished sending file: ${file.name}`);
+      setIsProcessing(false);
+    } catch (error) {
+      console.error("❌ Error uploading file: ", error);
+      alert("Error processing audio file.");
+      setIsProcessing(false);
     }
   };
 
@@ -212,12 +280,21 @@ const [selectedClaim, setSelectedClaim] = useState(null);
       mediaRecorderReference.current.stream.getTracks().forEach(track => track.stop());
       setIsRecording(false);
       setAudioLevel(0);
+      setIsProcessing(true);
 
       if (animationFrameReference.current) {
         cancelAnimationFrame(animationFrameReference.current);
       }
 
-      console.log("Recording stopped");
+      // Send stop recording message to backend
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'stop_recording'
+        }));
+        console.log("🛑 Sent stop recording signal");
+      }
+
+      console.log("🛑 Recording stopped");
     }
   };
 
@@ -294,17 +371,42 @@ const [selectedClaim, setSelectedClaim] = useState(null);
           </h1>
 
           <div className='mb-4'>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              accept="audio/*"
+              style={{ display: 'none' }}
+            />
             <Button
-              variant={isRecording ? 'danger' : 'primary'}
+              variant={isRecording ? 'danger' : 'success'}
               size='lg'
               onClick={isRecording ? stopRecording : startRecording}
-              disabled={!wsConnected}
+              disabled={!wsConnected || isProcessing}
+              style={{ minWidth: '200px', marginRight: '10px' }}>
+                {isRecording ? '🛑 Stop Recording' : '🎤 Start Recording'}
+            </Button>
+            <Button
+              variant='primary'
+              size='lg'
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!wsConnected || isProcessing || isRecording}
               style={{ minWidth: '200px' }}>
-                {isRecording ? 'Stop Recording' : 'Start Recording'}
+                {isProcessing ? 'Processing...' : '📁 Upload Audio File'}
             </Button>
             {!wsConnected && (
               <small className='text-danger d-block mt-2'>
                 Backend not connected!
+              </small>
+            )}
+            {isRecording && (
+              <small className='text-info d-block mt-2'>
+                🎤 Recording in progress...
+              </small>
+            )}
+            {isProcessing && (
+              <small className='text-info d-block mt-2'>
+                ⏳ Processing audio...
               </small>
             )}
           </div>
