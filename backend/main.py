@@ -182,6 +182,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     audio_buffer = bytearray()
     session_id = None
+    session_type = None  # 'recording' or 'upload'
     
     try:
         while True:
@@ -189,19 +190,44 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 data = await asyncio.wait_for(websocket.receive(), timeout=2.0)
             except asyncio.TimeoutError:
-                # If we have buffered audio and no new data, process it
-                if len(audio_buffer) > 0:
-                    print(f"\n🎵 Processing complete audio file: {len(audio_buffer)} bytes")
+                # If we have buffered audio from file upload and no new data, process it
+                if len(audio_buffer) > 0 and session_type == 'upload':
+                    print(f"\n🎵 Processing uploaded audio file: {len(audio_buffer)} bytes")
                     await process_audio(bytes(audio_buffer), websocket)
                     audio_buffer.clear()
+                    session_type = None
+                    # Send processing complete message
+                    await websocket.send_json({"type": "processing_complete"})
                     print("✅ Processing complete, waiting for new uploads...")
                 continue
             
-            # First message is JSON with session ID
+            # Handle JSON messages
             if 'text' in data:
                 message = json.loads(data['text'])
-                session_id = message.get('id')
-                print(f"📥 Received session ID: {session_id}")
+                msg_type = message.get('type')
+                
+                if msg_type == 'start_recording':
+                    session_id = message.get('id')
+                    session_type = 'recording'
+                    audio_buffer.clear()
+                    print(f"🎤 Received recording session ID: {session_id}")
+                    
+                elif msg_type == 'upload_file':
+                    session_id = message.get('id')
+                    session_type = 'upload'
+                    audio_buffer.clear()
+                    print(f"📁 Received file upload session ID: {session_id}")
+                    
+                elif msg_type == 'stop_recording':
+                    # Process the recorded audio
+                    if len(audio_buffer) > 0 and session_type == 'recording':
+                        print(f"\n🎤 Processing recorded audio: {len(audio_buffer)} bytes")
+                        await process_audio(bytes(audio_buffer), websocket)
+                        audio_buffer.clear()
+                        session_type = None
+                        # Send processing complete message
+                        await websocket.send_json({"type": "processing_complete"})
+                        print("✅ Recording processed, ready for next session")
                 continue
             
             # Subsequent messages are binary audio chunks
