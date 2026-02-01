@@ -79,42 +79,53 @@ async def extract_claim(text: str) -> Optional[str]:
             messages=[
                 {
                     "role": "system",
-                    "content": """You are a claim detection engine analyzing a live audio stream.
-        The input text is a rolling buffer of the last few sentences spoken.
-        Determine if the text *contains* a "Verifiable Factual Claim" that has just been completed.
+                    "content": """You are a specialized claim extractor for a live transcript.
+        The input text is a rolling buffer of the last 3 sentences.
 
-        Respond with ONLY "YES" or "NO".
+        YOUR GOAL:
+        Determine if the **VERY LAST** sentence (or sentence fragment) in the buffer forms a new verifiable factual claim.
 
-        Criteria for "YES":
-        1. The statement contains specific data, statistics, or numbers (e.g., "Inflation is 10%").
-        2. It asserts a specific event, action, or historical fact.
-        3. It makes a definitive statement about reality (e.g., "Paris is in France").
-        4. Important: If the start of the text is old context, but the *end* of the text completes a new claim, respond YES.
+        RULES:
+        1. IGNORE any claims that appear earlier in the text. Only look at the end.
+        2. If the last sentence is a QUESTION, return "NO".
+        3. If the last sentence is an OPINION, return "NO".
+        4. If the last sentence is a fragment that completes a claim started earlier (e.g. "...is 10 percent"), combine it and return the full claim.
 
-        Criteria for "NO":
-        1. Pure opinions ("I think...", "In my opinion").
-        2. Future predictions ("It will rain tomorrow").
-        3. Vague generalizations ("Life is hard").
-        4. Questions or commands.
+        OUTPUT FORMAT:
+        - If a NEW claim is found at the end: Return ONLY the claim text.
+        - Otherwise: Return "NO".
 
-        If the text contains a specific statistic, ALWAYS respond YES."""
+        Example 1 (Stale Claim - IGNORE):
+        Input: "Inflation is 5%. What is the weather?"
+        Output: "NO"
+        (Reason: The last sentence is a question. The claim 'Inflation is 5%' is old.)
+
+        Example 2 (Fragmented Claim - EXTRACT):
+        Input: "The inflation rate... is 5 percent."
+        Output: "The inflation rate is 5 percent."
+        """
                 },
                 {
                     "role": "user",
                     "content": text
                 }
             ],
-            temperature=0.0,
-            max_tokens=10  # Increased slightly to allow for "YES" with potential whitespace
+            temperature=0.0,  # Keep strict
+            max_tokens=60
         )
 
-        is_claim = completion.choices[0].message.content.strip().upper()
-        dprint("LOGIC", f"🕵️ Is Claim? {is_claim} (took {time.monotonic() - t0:.2f}s)")
+        result = completion.choices[0].message.content.strip()
 
-        if "YES" in is_claim:
-            return text
+        # Clean up quotes if the LLM added them
+        result = result.replace('"', '').replace("'", "")
+        dprint("LOGIC", f"🕵️ Is Claim? {result} (took {time.monotonic() - t0:.2f}s)")
 
-        return None
+        # Filter out negative responses
+        if result.upper().startswith("NO") or len(result) < 5:
+            return None
+
+        return result
+
     except Exception as e:
         dprint("LOGIC", f"❌ Error in extract_claim: {e}")
         return None

@@ -67,7 +67,7 @@ async def handle_sentence(full_context, text, sentence_id, user_socket):
 
         # Step 3: Perform RAG/Search to verify the claim against reliable sources
         start_verify = time.monotonic()
-        verdict = await logic.verify_claim(full_context)
+        verdict = await logic.verify_claim(claim_text)
         dprint("HANDLE", f"verify_claim completed in {time.monotonic() - start_verify:.2f}s")
 
         # Step 4: Push the final verdict and explanation to the UI
