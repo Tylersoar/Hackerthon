@@ -107,8 +107,9 @@ def _looks_like_claim(text: str) -> bool:
     return any(re.search(p, tl) for p in factual_patterns)
 
 
-async def extract_claim(text: str) -> Optional[str]:
-    """Return a claim string if `text` contains a verifiable factual claim.
+async def extract_claim(text: str, context_text: Optional[str] = None) -> Optional[str]:
+    """Return a claim string if `text` (the last sentence) contains a
+    verifiable factual claim, possibly relying on prior context.
 
     Model output is made robust to the following possibilities:
     - "NO" → return None
@@ -117,7 +118,10 @@ async def extract_claim(text: str) -> Optional[str]:
     - very short non-NO outputs (e.g., accidental "YES" variants) → fall back to original `text`
 
     Parameters:
-        text: Transcribed sentence to check.
+        text: Transcribed last sentence to check (highlight span must come from this).
+        context_text: Optional preceding context (e.g., previous 1–3 sentences)
+                      to help determine if the last sentence forms a claim when
+                      combined with earlier information.
 
     Returns:
         A claim string (either extracted or the original sentence) when a claim is
@@ -126,14 +130,35 @@ async def extract_claim(text: str) -> Optional[str]:
     Logging:
         Emits timing and the raw model output via `dprint`.
     """
-    dprint("LOGIC", f"🕵️ Checking if claim: '{text[:50]}...'")
+    dprint("LOGIC", f"🕵️ Checking if claim: '{text[:50]}...' with context={bool(context_text)}")
     try:
         t0 = time.monotonic()
         # IMPORTANT: Groq SDK is synchronous; run in a worker thread.
-        completion = await asyncio.to_thread(
-            groq_client.chat.completions.create,
-            model="llama-3.3-70b-versatile",
-            messages=[
+        if context_text:
+            sys_prompt = (
+                "You are a strict claim extraction engine.\n"
+                "Input: The immediately preceding context and the last sentence.\n"
+                "Task: Decide if the LAST SENTENCE constitutes a grammatically complete, verifiable factual claim\n"
+                "on its own OR when combined with the provided context.\n\n"
+                "Rules:\n"
+                "1. If the last sentence is a FRAGMENT (missing verb/object/value) and context does not fix it → respond with NO.\n"
+                "2. If it's an OPINION or QUESTION → respond with NO.\n"
+                "3. If there is a COMPLETE verifiable fact, return ONLY the minimal claim text taken FROM THE LAST SENTENCE.\n"
+                "   - If the subject is only in context, still select the predicate phrase from the last sentence (do not copy context words).\n"
+                "   - Keep it concise; no added explanations.\n\n"
+                "Output: Either the exact claim text (from the last sentence) or NO."
+            )
+            user_prompt = (
+                f"Context (may be empty):\n{context_text}\n\n"
+                f"Last sentence:\n{text}\n\n"
+                "Return only the claim text from the last sentence, or NO."
+            )
+            messages = [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        else:
+            messages = [
                 {
                     "role": "system",
                     "content": """You are a strict claim extraction engine.
@@ -148,13 +173,15 @@ async def extract_claim(text: str) -> Optional[str]:
         Output: Either the exact claim text, or NO. Do not add explanations.
         """
                 },
-                {
-                    "role": "user",
-                    "content": text
-                }
-            ],
+                {"role": "user", "content": text},
+            ]
+
+        completion = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=messages,
             temperature=0.1,
-            max_tokens=60
+            max_tokens=80
         )
 
         raw = completion.choices[0].message.content or ""
@@ -174,7 +201,8 @@ async def extract_claim(text: str) -> Optional[str]:
         # Negative responses (more permissive patterns)
         if lower in {"no", "no.", "not", "none"} or lower.startswith("no"):
             # Heuristic fallback: if the sentence looks like a claim, keep it
-            if os.getenv("CLAIM_FALLBACK_PERMISSIVE", "1") not in ("0", "false", "False") and _looks_like_claim(text):
+            permissive = os.getenv("CLAIM_FALLBACK_PERMISSIVE", "1") not in ("0", "false", "False")
+            if permissive and (_looks_like_claim(text) or (context_text and _looks_like_claim(f"{context_text} {text}"))):
                 dprint("LOGIC", "↩️ Heuristic override: LLM said NO but sentence looks like a claim — using full sentence")
                 return text
             return None

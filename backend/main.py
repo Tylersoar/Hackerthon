@@ -165,13 +165,73 @@ async def websocket_endpoint(user_socket : WebSocket) :
         except Exception:
             return s
 
-    async def _send_transcript(text: str, is_final: bool):
+    async def _send_transcript(text: str, is_final: bool, sid: str | None = None):
         await user_socket.send_json({
             "type": "transcript",
             "text": text,
-            "id": current_sentence_id,
+            "id": sid or current_sentence_id,
             "is_final": is_final
         })
+
+    def _split_terminated_sentences(text: str):
+        """
+        Split text into a list of fully terminated sentences and a trailing remainder.
+        A sentence is considered terminated if it ends with one of . ! ? (optionally
+        followed by quotes/brackets and spaces). This is conservative but effective
+        to process multi-sentence utterances promptly.
+        """
+        s = text or ""
+        sentences = []
+        n = len(s)
+        start = 0
+        i = 0
+        terminal_set = {'.', '!', '?'}
+        trailing = set(['"', "'", ')', ']', '}', '”', '’', ' '])
+        while i < n:
+            ch = s[i]
+            if ch in terminal_set:
+                j = i + 1
+                # consume trailing quotes/brackets/spaces
+                while j < n and s[j] in trailing:
+                    j += 1
+                sent = s[start:j].strip()
+                if sent:
+                    sentences.append(sent)
+                start = j
+                i = j
+                continue
+            i += 1
+        remainder = s[start:].strip()
+        return sentences, remainder
+
+    async def _finalize_sentence_and_dispatch(final_text: str, sentence_id_value: str, reason: str = "segmented"):
+        """Finalize a single sentence: emit final transcript, extract claim with prior context,
+        update rolling context, and schedule verification if a claim is found.
+        Does not mutate working_text/current_sentence_id; caller manages those.
+        """
+        nonlocal context_sentences
+        # 1) Send final transcript for this sentence id
+        await _send_transcript(final_text, True, sentence_id_value)
+
+        # 2) Build prior context (before appending current) for extraction
+        prior_context = " ".join(context_sentences[-CONTEXT_SENTENCES:]) if context_sentences else None
+        dprint("DG", f"Finalizing sentence (reason={reason}), extracting claim with prior context…")
+        claim_text = await logic.extract_claim(final_text, context_text=prior_context)
+
+        # 3) Update rolling context
+        context_sentences.append(final_text)
+        if len(context_sentences) > CONTEXT_SENTENCES:
+            context_sentences = context_sentences[-CONTEXT_SENTENCES:]
+
+        # 4) Trigger verification if a claim was detected
+        if claim_text:
+            full_context = " ".join(context_sentences[-CONTEXT_SENTENCES:])
+            dprint("DG", f"Claim FOUND; scheduling verify_and_report (id={sentence_id_value})")
+            asyncio.create_task(
+                verify_and_report(claim_text, full_context, sentence_id_value, user_socket)
+            )
+        else:
+            dprint("DG", "No claim in finalized sentence.")
 
     async def _finalize_current(local_seq: int, reason: str = "grace"):
         nonlocal working_text, current_sentence_id, update_seq, pending_idle_task, pending_finalize_task, context_sentences
@@ -185,27 +245,19 @@ async def websocket_endpoint(user_socket : WebSocket) :
             dprint("DG", "Finalize skipped (empty text)")
             return
 
-        # Send one final transcript update with is_final=True
-        await _send_transcript(final_text, True)
+        # Split into fully-terminated sentences and a trailing remainder
+        sentences, remainder = _split_terminated_sentences(final_text)
+        ids = []
+        # First sentence uses current id, subsequent get new ids
+        for idx, sent in enumerate(sentences):
+            sid = current_sentence_id if idx == 0 else str(uuid.uuid4())
+            ids.append(sid)
+            await _finalize_sentence_and_dispatch(sent, sid, reason=reason)
 
-        # Update rolling context (keep last N-1 and append this)
-        context_sentences.append(final_text)
-        if len(context_sentences) > CONTEXT_SENTENCES:
-            context_sentences = context_sentences[-CONTEXT_SENTENCES:]
-
-        # Extract a claim from the finalized sentence
-        dprint("DG", f"Finalizing sentence (reason={reason}), extracting claim…")
-        claim_text = await logic.extract_claim(final_text)
-
-        if claim_text:
-            # Build context for verification: join last up to CONTEXT_SENTENCES sentences
-            full_context = " ".join(context_sentences[-CONTEXT_SENTENCES:])
-            dprint("DG", f"Claim FOUND; scheduling verify_and_report (id={current_sentence_id})")
-            asyncio.create_task(
-                verify_and_report(claim_text, full_context, current_sentence_id, user_socket)
-            )
-        else:
-            dprint("DG", "No claim in finalized sentence.")
+        # If there's a remainder (non-terminated), finalize it as well since we're timing out/closing
+        if remainder:
+            sid = str(uuid.uuid4()) if sentences else current_sentence_id
+            await _finalize_sentence_and_dispatch(remainder, sid, reason=reason + ":remainder")
 
         # Rotate state for next sentence
         working_text = ""
@@ -281,19 +333,36 @@ async def websocket_endpoint(user_socket : WebSocket) :
             # Optional conservative normalization of the incoming piece
             sentence_norm = _normalize_transcript_piece(sentence)
 
-            # Update live working text (append sentence piece)
+            # Update live working text (append piece) and segment any fully-terminated sentences
             new_working = (working_text + " " + sentence_norm).strip()
             working_text = new_working
 
-            # Bump sequence and broadcast interim transcript (not final)
-            update_seq += 1
-            await _send_transcript(working_text, False)
+            # Segment into completed sentences and a trailing remainder
+            sentences, remainder = _split_terminated_sentences(working_text)
 
-            # Schedule/refresh idle finalize based on current text
-            await _schedule_idle_finalize(update_seq)
+            # If we have any completed sentences, finalize them immediately
+            if sentences:
+                # Bump sequence so any pending finalize tasks are invalidated
+                update_seq += 1
+                # Finalize first sentence with current id, others with new ids
+                for idx, sent in enumerate(sentences):
+                    sid = current_sentence_id if idx == 0 else str(uuid.uuid4())
+                    await _finalize_sentence_and_dispatch(sent, sid, reason="segment")
+                # After processing, set remainder as new working text and rotate current id
+                working_text = remainder
+                current_sentence_id = str(uuid.uuid4())
 
-            # If Deepgram marks this chunk as final, schedule a grace finalize
-            if is_final:
+            # Send interim transcript for the current remainder (if any)
+            if working_text:
+                # Bump sequence for the current interim state
+                update_seq += 1
+                await _send_transcript(working_text, False, current_sentence_id)
+
+                # Schedule/refresh idle finalize based on current text
+                await _schedule_idle_finalize(update_seq)
+
+            # If Deepgram marks this chunk as final, schedule a grace finalize for the remainder
+            if is_final and working_text:
                 delay = _choose_grace_seconds(working_text)
                 dprint("DG", f"Scheduling finalize in {delay:.2f}s (is_final from DG)")
                 await _schedule_finalize_after(delay, update_seq, reason="dg_final")
