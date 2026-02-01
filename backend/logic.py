@@ -28,6 +28,7 @@ from groq import Groq
 from tavily import TavilyClient
 from dotenv import load_dotenv
 from typing import Any, Dict, List, Optional
+import re
 
 load_dotenv()
 
@@ -53,21 +54,77 @@ def dprint(component: str, message: str) -> None:
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
-async def extract_claim(text: str) -> Optional[str]:
-    """Return the input `text` if it contains a verifiable factual claim.
+def _strip_code_fences(s: str) -> str:
+    """Remove common markdown code fences and surrounding ticks/quotes."""
+    if not s:
+        return s
+    s = s.strip()
+    # Remove triple backtick blocks
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z0-9]*\n?|```$", "", s).strip()
+    # Strip remaining single backticks and quotes
+    s = s.strip("` ")
+    s = s.replace('"', '').replace("'", "").strip()
+    return s
 
-    This function delegates to a small Groq prompt that must respond strictly
-    with "YES" or "NO". A "YES" means the sentence should be fact-checked;
-    in that case we return the original `text`. A "NO" results in `None`.
+
+def _looks_like_claim(text: str) -> bool:
+    """Heuristic to decide if a sentence looks like a verifiable factual claim.
+
+    Conservative but permissive enough to keep the pipeline flowing when the LLM
+    is indecisive or returns "NO" too often.
+    """
+    if not text:
+        return False
+    t = text.strip()
+    # Avoid questions
+    if "?" in t:
+        return False
+    # Minimum length
+    if len(t) < 25 and len(t.split()) < 5:
+        return False
+    tl = t.lower()
+    # Avoid obvious opinions
+    opinion_markers = [
+        "i think", "i believe", "in my opinion", "it seems", "i feel",
+    ]
+    if any(m in tl for m in opinion_markers):
+        return False
+
+    # Signals of factuality: be/have verbs, numbers, dates, measured values, sources
+    factual_patterns = [
+        r"\b(is|are|was|were|has|have|had|contains|contained|includes|included)\b",
+        r"\bfound that\b",
+        r"\breported\b",
+        r"\bestimated\b",
+        r"\baccording to\b",
+        r"\bin the year\b",
+        r"\b\d{4}\b",            # years
+        r"\b\d+(\.\d+)?%\b",    # percentages
+        r"\b\d+(,\d{3})+\b",     # large numbers with commas
+        r"\b\d+(\.\d+)?\b",     # any number
+    ]
+    return any(re.search(p, tl) for p in factual_patterns)
+
+
+async def extract_claim(text: str) -> Optional[str]:
+    """Return a claim string if `text` contains a verifiable factual claim.
+
+    Model output is made robust to the following possibilities:
+    - "NO" → return None
+    - "YES" → return the original `text`
+    - direct claim string → return that string
+    - very short non-NO outputs (e.g., accidental "YES" variants) → fall back to original `text`
 
     Parameters:
         text: Transcribed sentence to check.
 
     Returns:
-        The same `text` when a claim is detected; otherwise `None`.
+        A claim string (either extracted or the original sentence) when a claim is
+        detected; otherwise `None`.
 
     Logging:
-        Emits timing of the LLM call and the YES/NO result via `dprint`.
+        Emits timing and the raw model output via `dprint`.
     """
     dprint("LOGIC", f"🕵️ Checking if claim: '{text[:50]}...'")
     try:
@@ -79,30 +136,16 @@ async def extract_claim(text: str) -> Optional[str]:
             messages=[
                 {
                     "role": "system",
-                    "content": """You are a specialized claim extractor for a live transcript.
-        The input text is a rolling buffer of the last 3 sentences.
+                    "content": """You are a strict claim extraction engine.
+        Input: A transcript of spoken audio.
+        Task: From the given text, decide if there is a grammatically complete, verifiable factual claim.
 
-        YOUR GOAL:
-        Determine if the **VERY LAST** sentence (or sentence fragment) in the buffer forms a new verifiable factual claim.
+        Rules:
+        1. If the text is a FRAGMENT (missing verb/object/value) → respond with NO.
+        2. If the text is an OPINION or QUESTION → respond with NO.
+        3. If there is a COMPLETE verifiable fact, return ONLY the claim text.
 
-        RULES:
-        1. IGNORE any claims that appear earlier in the text. Only look at the end.
-        2. If the last sentence is a QUESTION, return "NO".
-        3. If the last sentence is an OPINION, return "NO".
-        4. If the last sentence is a fragment that completes a claim started earlier (e.g. "...is 10 percent"), combine it and return the full claim.
-
-        OUTPUT FORMAT:
-        - If a NEW claim is found at the end: Return ONLY the claim text.
-        - Otherwise: Return "NO".
-
-        Example 1 (Stale Claim - IGNORE):
-        Input: "Inflation is 5%. What is the weather?"
-        Output: "NO"
-        (Reason: The last sentence is a question. The claim 'Inflation is 5%' is old.)
-
-        Example 2 (Fragmented Claim - EXTRACT):
-        Input: "The inflation rate... is 5 percent."
-        Output: "The inflation rate is 5 percent."
+        Output: Either the exact claim text, or NO. Do not add explanations.
         """
                 },
                 {
@@ -110,27 +153,51 @@ async def extract_claim(text: str) -> Optional[str]:
                     "content": text
                 }
             ],
-            temperature=0.0,  # Keep strict
+            temperature=0.1,
             max_tokens=60
         )
 
-        result = completion.choices[0].message.content.strip()
+        raw = completion.choices[0].message.content or ""
+        result = _strip_code_fences(raw)
 
-        # Clean up quotes if the LLM added them
-        result = result.replace('"', '').replace("'", "")
-        dprint("LOGIC", f"🕵️ Is Claim? {result} (took {time.monotonic() - t0:.2f}s)")
+        # Also strip a leading label like "Claim:" if present
+        # Keep this conservative to avoid chopping valid content.
+        lower = result.lower()
+        for prefix in ("claim:", "extracted claim:", "the claim is:", "this is a claim:"):
+            if lower.startswith(prefix):
+                result = result[len(prefix):].strip()
+                lower = result.lower()
+                break
 
-        # Filter out negative responses
-        if result.upper().startswith("NO") or len(result) < 5:
+        dprint("LOGIC", f"🕵️ Extract raw: {result} (took {time.monotonic() - t0:.2f}s)")
+
+        # Negative responses (more permissive patterns)
+        if lower in {"no", "no.", "not", "none"} or lower.startswith("no"):
+            # Heuristic fallback: if the sentence looks like a claim, keep it
+            if os.getenv("CLAIM_FALLBACK_PERMISSIVE", "1") not in ("0", "false", "False") and _looks_like_claim(text):
+                dprint("LOGIC", "↩️ Heuristic override: LLM said NO but sentence looks like a claim — using full sentence")
+                return text
             return None
+
+        # Explicit YES → treat the whole sentence as the claim
+        if lower in {"yes", "yes.", "true"} or lower.startswith("yes"):
+            return text
+
+        # If model returned some short token (e.g., "Yes" variants or truncated), fall back to sentence
+        if len(result) < 10:
+            return text
 
         return result
 
     except Exception as e:
         dprint("LOGIC", f"❌ Error in extract_claim: {e}")
+        # Fallback: keep the pipeline alive with heuristic if enabled
+        if os.getenv("CLAIM_FALLBACK_PERMISSIVE", "1") not in ("0", "false", "False") and _looks_like_claim(text):
+            dprint("LOGIC", "↩️ Heuristic override on error: using full sentence as claim")
+            return text
         return None
 
-async def verify_claim(claim_text: str) -> Dict[str, Any]:
+async def verify_claim(claim_text: str, context_text: Optional[str] = None) -> Dict[str, Any]:
     """Verify a factual claim using Tavily search + Groq analysis.
 
     Steps:
@@ -156,13 +223,58 @@ async def verify_claim(claim_text: str) -> Dict[str, Any]:
         Emits timings for Tavily and Groq calls, number of sources found,
         a preview of source URLs, and JSON-parse errors when applicable.
     """
-    dprint("LOGIC", f"🌍 Searching Tavily for: '{claim_text[:50]}...'")
+    # Step 0: Expand the claim using recent context to resolve pronouns/generic nouns (if provided)
+    expanded_claim = claim_text
+    if context_text:
+        try:
+            dprint("LOGIC", "🧩 Expanding claim with context...")
+            t_expand = time.monotonic()
+            expansion = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You rewrite claims to be standalone using the provided context. Return STRICT JSON only.\n\n"
+                            "Rules:\n"
+                            "- If the claim contains pronouns or generic nouns (e.g., 'they', 'the bears'), and the context unambiguously specifies the referent (e.g., 'polar bears'), replace with the specific term.\n"
+                            "- Do NOT introduce new facts not supported by the context.\n"
+                            "- Keep the meaning intact and concise.\n"
+                            "- If context is ambiguous or insufficient, return the original claim unchanged.\n\n"
+                            "Output JSON schema:\n{\n  \"expanded_claim\": string\n}"
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Context (last sentences):\n{context_text}\n\n"
+                            f"Claim to rewrite as standalone: {claim_text}\n"
+                            "Respond with JSON only."
+                        )
+                    }
+                ],
+                temperature=0.0,
+                max_tokens=100
+            )
+            try:
+                j = json.loads(expansion.choices[0].message.content.strip())
+                ec = (j.get("expanded_claim") or "").strip()
+                if 5 <= len(ec) <= 400:
+                    expanded_claim = ec
+                dprint("LOGIC", f"🧩 Expansion took {time.monotonic() - t_expand:.2f}s; using expanded claim")
+            except Exception as je:
+                dprint("LOGIC", f"⚠️ Expansion JSON parse failed; using original claim. Error: {je}")
+        except Exception as e:
+            dprint("LOGIC", f"⚠️ Expansion step failed; using original claim. Error: {e}")
+
+    dprint("LOGIC", f"🌍 Searching Tavily for: '{expanded_claim[:50]}...'")
     try:
         t_search = time.monotonic()
         # Tavily client is synchronous; run it in a worker thread.
         search_response = await asyncio.to_thread(
             tavily_client.search,
-            query=claim_text,
+            query=expanded_claim,
             search_depth="advanced",
             max_results=3
         )
@@ -196,17 +308,23 @@ async def verify_claim(claim_text: str) -> Dict[str, Any]:
                 {
                     "role": "system",
                     "content": (
-                        "You are a fact-checker. Analyze the claim against the evidence provided.\n\n"
-                        "Respond ONLY with valid JSON in this exact format:\n"
+                        "You are a careful, conservative fact-checker. Analyze the claim against the evidence provided.\n\n"
+                        "If the evidence is mixed, weak, or insufficient to determine truth, avoid a false negative and respond with an unknown verdict.\n\n"
+                        "Respond ONLY with valid JSON in this exact format (no extra text):\n"
                         "{\n"
-                        "    \"isTrue\": true or false,\n"
-                        "    \"explanation\": \"Brief explanation why the claim is true/false based on evidence\"\n"
+                        "  \"isTrue\": true | false | null,\n"
+                        "  \"explanation\": \"Brief, neutral explanation citing why it is true/false/unknown based on the evidence. If unknown, state that evidence is insufficient.\"\n"
                         "}"
                     )
                 },
                 {
                     "role": "user",
-                    "content": f"Claim: {claim_text}\n\nEvidence:\n{evidence_text}\n\nAnalyze this claim."
+                    "content": (
+                        f"Claim (standalone): {expanded_claim}\n\n"
+                        f"Evidence:\n{evidence_text}\n\n"
+                        + (f"Context for reference (optional):\n{context_text}\n\n" if context_text else "")
+                        + "Analyze this claim."
+                    )
                 }
             ],
             temperature=0.2,
@@ -219,16 +337,22 @@ async def verify_claim(claim_text: str) -> Dict[str, Any]:
             # Some models may accidentally include backticks or extra text.
             # We defensively strip whitespace and attempt JSON parsing.
             analysis = json.loads(analysis_completion.choices[0].message.content.strip())
+            # Normalize to allow null for unknown
+            if "isTrue" in analysis and analysis["isTrue"] not in (True, False, None):
+                # If model returned string like "unknown", coerce to None
+                if isinstance(analysis["isTrue"], str) and analysis["isTrue"].strip().lower() in {"unknown", "uncertain", "not sure", "insufficient"}:
+                    analysis["isTrue"] = None
             dprint("LOGIC", f"🧠 Analysis complete: {analysis.get('isTrue')}")
         except json.JSONDecodeError:
             dprint("LOGIC", f"❌ JSON Parse Error")
             analysis = {
-                "isTrue": False,
-                "explanation": "Unable to parse analysis"
+                "isTrue": None,
+                "explanation": "Unable to parse analysis; verdict unknown"
             }
 
         return {
             "claim": claim_text,
+            "expanded_claim": expanded_claim,
             "evidence": evidence,
             "result": analysis
         }
@@ -236,6 +360,7 @@ async def verify_claim(claim_text: str) -> Dict[str, Any]:
         dprint("LOGIC", f"❌ Error in verify_claim: {e}")
         return {
             "claim": claim_text,
+            "expanded_claim": claim_text,
             "evidence": [],
-            "result": {"isTrue": False, "explanation": f"Error: {str(e)}"}
+            "result": {"isTrue": None, "explanation": f"Error: {str(e)}"}
         }

@@ -10,14 +10,13 @@ import asyncio
 import os
 import uuid
 import time
-from collections import deque
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket
 from deepgram import DeepgramClient
 from deepgram.clients.live.v1 import LiveTranscriptionEvents, LiveOptions
 from dotenv import load_dotenv
-import logic  # We import the file we just made
+import logic
 
 load_dotenv()
 
@@ -37,50 +36,44 @@ def _ts():
 def dprint(component, message):
     print(f"[{_ts()}] [{component}] {message}")
 
-async def handle_sentence(full_context, text, sentence_id, user_socket):
+async def verify_and_report(claim_text, full_context, sentence_id, user_socket):
     """
-    Processes a finalized sentence to detect and verify claims.
-
-    :param text: The transcribed text string.
-    :param sentence_id: A unique UUID for tracking this specific sentence.
-    :param user_socket: The active WebSocket connection to the frontend.
+    Verifies a detected claim and sends the result to the frontend.
+    
+    :param claim_text: The extracted claim string.
+    :param full_context: The full text context (accumulator value) for better verification.
+    :param sentence_id: The UUID for this sentence block.
+    :param user_socket: The active WebSocket connection.
     """
-    dprint("HANDLE", f"Start handle_sentence id={sentence_id}")
+    dprint("HANDLE", f"Start verify_and_report id={sentence_id}")
 
-    # Step 1: Use LLM to determine if the sentence contains a verifiable claim
-    start_claim = time.monotonic()
-    claim_text = await logic.extract_claim(full_context)
-    dprint(
-        "HANDLE",
-        f"extract_claim completed in {time.monotonic() - start_claim:.2f}s; has_claim={'YES' if claim_text else 'NO'}",
-    )
+    # Step 1: Notify frontend immediately so it can show a "loading/checking" state
+    # We already have the claim text here.
+    dprint("HANDLE", f"Sending claim_detected id={sentence_id}")
+    await user_socket.send_json({
+        "type": "claim_detected",
+        "id": sentence_id,
+        "claim": claim_text
+    })
 
-    if claim_text:
-        # Step 2: Notify frontend immediately so it can show a "loading/checking" state
-        dprint("HANDLE", f"Sending claim_detected id={sentence_id}")
-        await user_socket.send_json({
-            "type": "claim_detected",
-            "id": sentence_id,
-            "claim": text
+    # Step 2: Perform RAG/Search to verify the claim against reliable sources
+    start_verify = time.monotonic()
+    verdict = await logic.verify_claim(claim_text, context_text=full_context)
+    dprint("HANDLE", f"verify_claim completed in {time.monotonic() - start_verify:.2f}s")
 
-        })
+    # Step 3: Push the final verdict and explanation to the UI
+    dprint("HANDLE", f"Sending fact_check id={sentence_id} isTrue={verdict['result']['isTrue']}")
+    await user_socket.send_json({
+        "type": "fact_check",
+        "id": sentence_id,
+        "expandedClaim": verdict.get("expanded_claim", claim_text),
+        "result": {
+            "isTrue": verdict["result"]["isTrue"],
+            "explanation": verdict["result"]["explanation"]
+        }
+    })
+    dprint("HANDLE", f"Completed verify_and_report id={sentence_id}")
 
-        # Step 3: Perform RAG/Search to verify the claim against reliable sources
-        start_verify = time.monotonic()
-        verdict = await logic.verify_claim(claim_text)
-        dprint("HANDLE", f"verify_claim completed in {time.monotonic() - start_verify:.2f}s")
-
-        # Step 4: Push the final verdict and explanation to the UI
-        dprint("HANDLE", f"Sending fact_check id={sentence_id} isTrue={verdict['result']['isTrue']}")
-        await user_socket.send_json({
-            "type": "fact_check",
-            "id": sentence_id,
-            "result": {
-                "isTrue": verdict["result"]["isTrue"],
-                "explanation": verdict["result"]["explanation"]
-            }
-        })
-        dprint("HANDLE", f"Completed handle_sentence id={sentence_id}")
 
 # --- THE MAIN LOOP ---
 @app.websocket("/ws")
@@ -92,10 +85,25 @@ async def websocket_endpoint(user_socket : WebSocket) :
     await user_socket.accept()
     dprint("WS", "WebSocket connection accepted")
 
-    context_buffer = deque(maxlen=3)
+    # --- Session state ---
+    # Rolling context of last finalized sentences (strings)
+    context_sentences = []
+    CONTEXT_SENTENCES = int(os.getenv("CONTEXT_SENTENCES", "3"))
 
-    # Unique ID allows the frontend to link transcripts to future fact-check results
+    # Sentence assembly state
     current_sentence_id = str(uuid.uuid4())
+    working_text = ""  # live, growing text for the current sentence
+
+    # Finalization guards/timers
+    update_seq = 0  # increases on every DG update; guards pending finalize tasks
+    pending_finalize_task = None
+    pending_idle_task = None
+
+    # Grace timings (seconds)
+    GRACE_PUNCT = float(os.getenv("GRACE_PUNCT", "0.55"))
+    GRACE_NOPUNCT = float(os.getenv("GRACE_NOPUNCT", "1.30"))
+    GRACE_CONNECTOR = float(os.getenv("GRACE_CONNECTOR", "2.00"))
+    NORMALIZE_TRANSCRIPT = os.getenv("NORMALIZE_TRANSCRIPT", "0") not in ("0", "false", "False", None)
 
     # Initialize a persistent connection to Deepgram's streaming API
     dg_connection = deepgram_client.listen.asyncwebsocket.v("1")
@@ -103,7 +111,8 @@ async def websocket_endpoint(user_socket : WebSocket) :
     options = LiveOptions(
         model="nova-3",
         smart_format=True,
-        endpointing=500,
+        # Increase endpointing so Deepgram is less likely to cut mid‑sentence
+        endpointing=1200,
         punctuate=True,
         language="en-US",
         # Switch to raw PCM 16-bit LE at 16kHz to ensure consistent decoding
@@ -113,18 +122,141 @@ async def websocket_endpoint(user_socket : WebSocket) :
     )
     dprint(
         "WS",
-        "Deepgram LiveOptions set (model=nova-3, smart_format=True, endpointing=500, punctuate=True, language=en-US)",
+        "Deepgram LiveOptions set (model=nova-3, smart_format=True, endpointing=1200, punctuate=True, language=en-US)",
     )
+
+    def _ends_with_terminal_punct(s: str) -> bool:
+        s = s.strip()
+        return len(s) > 0 and s[-1] in ".!?"
+
+    def _has_connector_or_comma(s: str) -> bool:
+        s = s.strip().lower()
+        # If sentence ends with comma/semicolon/colon, or last token is a connector, likely continuation
+        if s.endswith((",", ";", ":")):
+            return True
+        connector_tokens = {"that", "and", "than", "because", "which", "who", "whom", "whose", "while", "but"}
+        last = s.split()[-1] if s.split() else ""
+        return last in connector_tokens
+
+    def _choose_grace_seconds(s: str) -> float:
+        if _has_connector_or_comma(s):
+            return GRACE_CONNECTOR
+        return GRACE_PUNCT if _ends_with_terminal_punct(s) else GRACE_NOPUNCT
+
+    def _normalize_transcript_piece(s: str) -> str:
+        """
+        Conservative normalization to improve readability for common fused words.
+        Enabled only when NORMALIZE_TRANSCRIPT is truthy.
+        """
+        if not NORMALIZE_TRANSCRIPT or not s:
+            return s
+        try:
+            import re
+            rules = [
+                (re.compile(r"\bthebears\b", re.IGNORECASE), "the bears"),
+                (re.compile(r"\bthebear\b", re.IGNORECASE), "the bear"),
+                (re.compile(r"\bthebody\b", re.IGNORECASE), "the body"),
+                (re.compile(r"\bthebodies\b", re.IGNORECASE), "the bodies"),
+            ]
+            out = s
+            for pat, repl in rules:
+                out = pat.sub(repl, out)
+            return out
+        except Exception:
+            return s
+
+    async def _send_transcript(text: str, is_final: bool):
+        await user_socket.send_json({
+            "type": "transcript",
+            "text": text,
+            "id": current_sentence_id,
+            "is_final": is_final
+        })
+
+    async def _finalize_current(local_seq: int, reason: str = "grace"):
+        nonlocal working_text, current_sentence_id, update_seq, pending_idle_task, pending_finalize_task, context_sentences
+        # Guard: only finalize if no newer updates arrived
+        if local_seq != update_seq:
+            dprint("DG", f"Finalize skipped (seq changed) reason={reason}")
+            return
+
+        final_text = working_text.strip()
+        if not final_text:
+            dprint("DG", "Finalize skipped (empty text)")
+            return
+
+        # Send one final transcript update with is_final=True
+        await _send_transcript(final_text, True)
+
+        # Update rolling context (keep last N-1 and append this)
+        context_sentences.append(final_text)
+        if len(context_sentences) > CONTEXT_SENTENCES:
+            context_sentences = context_sentences[-CONTEXT_SENTENCES:]
+
+        # Extract a claim from the finalized sentence
+        dprint("DG", f"Finalizing sentence (reason={reason}), extracting claim…")
+        claim_text = await logic.extract_claim(final_text)
+
+        if claim_text:
+            # Build context for verification: join last up to CONTEXT_SENTENCES sentences
+            full_context = " ".join(context_sentences[-CONTEXT_SENTENCES:])
+            dprint("DG", f"Claim FOUND; scheduling verify_and_report (id={current_sentence_id})")
+            asyncio.create_task(
+                verify_and_report(claim_text, full_context, current_sentence_id, user_socket)
+            )
+        else:
+            dprint("DG", "No claim in finalized sentence.")
+
+        # Rotate state for next sentence
+        working_text = ""
+        current_sentence_id = str(uuid.uuid4())
+
+        # Clear timers
+        if pending_idle_task and not pending_idle_task.done():
+            pending_idle_task.cancel()
+        if pending_finalize_task and not pending_finalize_task.done():
+            pending_finalize_task.cancel()
+        pending_idle_task = None
+        pending_finalize_task = None
+
+    async def _schedule_finalize_after(delay: float, local_seq: int, reason: str):
+        nonlocal pending_finalize_task
+        async def runner():
+            try:
+                await asyncio.sleep(delay)
+                await _finalize_current(local_seq, reason)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                dprint("DG", f"Finalize task error: {e}")
+        # Cancel any existing finalize task
+        if pending_finalize_task and not pending_finalize_task.done():
+            pending_finalize_task.cancel()
+        pending_finalize_task = asyncio.create_task(runner())
+
+    async def _schedule_idle_finalize(local_seq: int):
+        nonlocal pending_idle_task
+        delay = _choose_grace_seconds(working_text)
+        async def runner():
+            try:
+                await asyncio.sleep(delay)
+                await _finalize_current(local_seq, reason="idle")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                dprint("DG", f"Idle finalize task error: {e}")
+        # Reset idle task
+        if pending_idle_task and not pending_idle_task.done():
+            pending_idle_task.cancel()
+        pending_idle_task = asyncio.create_task(runner())
 
     async def on_transcript(self, result, **kwargs):
         """
         Event handler: Runs whenever Deepgram processes a chunk of audio.
         """
-        nonlocal current_sentence_id
+        nonlocal current_sentence_id, working_text, update_seq
 
         try:
-            dprint("DG", "on_transcript event received")
-
             # Support both object- and dict-shaped payloads from SDK/events
             sentence = ""
             if isinstance(result, dict):
@@ -146,28 +278,26 @@ async def websocket_endpoint(user_socket : WebSocket) :
             if not sentence:
                 return
 
-            # Send interim or final text to frontend for real-time captions
-            preview = (sentence[:60] + "...") if len(sentence) > 60 else sentence
-            dprint("DG", f"Sending transcript id={current_sentence_id} is_final={is_final} text='{preview}'")
-            await user_socket.send_json(
-                {
-                    "type": "transcript",
-                    "text": sentence,
-                    "id": current_sentence_id
-                }
-            )
+            # Optional conservative normalization of the incoming piece
+            sentence_norm = _normalize_transcript_piece(sentence)
 
+            # Update live working text (append sentence piece)
+            new_working = (working_text + " " + sentence_norm).strip()
+            working_text = new_working
+
+            # Bump sequence and broadcast interim transcript (not final)
+            update_seq += 1
+            await _send_transcript(working_text, False)
+
+            # Schedule/refresh idle finalize based on current text
+            await _schedule_idle_finalize(update_seq)
+
+            # If Deepgram marks this chunk as final, schedule a grace finalize
             if is_final:
-                # Append sentence to context
-                context_buffer.append(sentence)
+                delay = _choose_grace_seconds(working_text)
+                dprint("DG", f"Scheduling finalize in {delay:.2f}s (is_final from DG)")
+                await _schedule_finalize_after(delay, update_seq, reason="dg_final")
 
-                full_context = " ".join(context_buffer)
-
-                # If Deepgram marks the sentence as finished, start the background fact-check
-                dprint("DG", f"Scheduling handle_sentence for id={current_sentence_id}")
-                asyncio.create_task(handle_sentence(full_context, sentence, current_sentence_id, user_socket))
-
-                current_sentence_id = str(uuid.uuid4())
         except Exception as e:
             dprint("DG", f"on_transcript error: {e}")
 
@@ -208,92 +338,12 @@ async def websocket_endpoint(user_socket : WebSocket) :
         dprint("WS", f"Error: {e}")
     finally:
         dprint("WS", "Finishing Deepgram websocket stream")
+        # Try finalizing any remaining working text before closing connection
+        if working_text.strip():
+            # Force immediate finalize ignoring sequence changes
+            try:
+                await _finalize_current(update_seq, reason="ws_close")
+            except Exception as e:
+                dprint("WS", f"Error finalizing on close: {e}")
         await dg_connection.finish()
         dprint("WS", "WebSocket handler exiting")
-
-# ---- LEGACY BELOW ------
-#
-# file_path = "../res/polarBear.mp3"
-#
-#
-# def main():
-#     print(f"📂 Reading audio file: {file_path}")
-#     with open(file_path, "rb") as audio_file:
-#         audio_bytes = audio_file.read()
-#
-#     # Transcription request (EXACTLY AS IN YOUR ORIGINAL CODE)
-#     response = deepgram_client.listen.v1.media.transcribe_file(
-#         request=audio_bytes,
-#         model="nova-3",
-#         smart_format=True,
-#         punctuate=True,
-#         language="en"
-#     )
-#
-#     # Extract transcript text
-#     transcript = response.results.channels[0].alternatives[0].transcript
-#     print("Transcript:", transcript)
-#
-#     # Message 1: Send transcript
-#     transcript_message = {
-#         "type": "transcript",
-#         "text": transcript
-#     }
-#     print("\n📤 Message 1 - TRANSCRIPT:")
-#     print(json.dumps(transcript_message, indent=2))
-#
-#     sentences = transcript.split('.')
-#
-#     for sentence in sentences:
-#         sentence = sentence.strip()
-#         if not sentence:
-#             continue
-#
-#         # --- CALL THE BRAIN (LOGIC.PY) ---
-#         # This replaces the huge block of code in your loop
-#         result_data = logic.process_sentence_logic(sentence)
-#
-#         if result_data:
-#             # Reconstruct the print statements you had originally
-#
-#             print(f"\n{'=' * 60}")
-#             print(f"🔍 Processing Claim: {sentence}")
-#             print('=' * 60)
-#
-#             # Message 2: Claim detected
-#             claim_detected_message = {
-#                 "type": "claim_detected",
-#                 "id": result_data["id"],
-#                 "claim": sentence
-#             }
-#             print("\n📤 Message 2 - CLAIM DETECTED:")
-#             print(json.dumps(claim_detected_message, indent=2))
-#
-#             # Print evidence summary
-#             for ev in result_data["evidence"]:
-#                 print(f"   Evidence: {ev[:200]}...")
-#
-#             # Message 3: Fact-check complete
-#             fact_check_message = {
-#                 "type": "fact_check",
-#                 "id": result_data["id"],
-#                 "result": {
-#                     "isTrue": result_data["result"]["isTrue"],
-#                     "explanation": result_data["result"]["explanation"]
-#                 }
-#             }
-#
-#             print(f"\n📤 Message 3 - FACT CHECK COMPLETE:")
-#             print(json.dumps(fact_check_message, indent=2))
-#
-#             # Display summary
-#             print(f"\n{'✅ TRUE' if result_data['result']['isTrue'] else '❌ FALSE'}")
-#             print(f"📊 Explanation: {result_data['result']['explanation']}")
-#
-#     print("\n" + "=" * 60)
-#     print("✅ ALL MESSAGES SENT TO FRONTEND")
-#     print("=" * 60)
-#
-#
-# if __name__ == "__main__":
-#     main()
