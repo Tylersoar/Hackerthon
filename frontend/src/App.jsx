@@ -4,8 +4,9 @@ import './App.css'
 import 'bootstrap/dist/css/bootstrap.min.css'
 
 function App() {
-  const [isRecording, setIsRecording] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(0);
+  // const [isRecording, setIsRecording] = useState(false);
+  // const [audioLevel, setAudioLevel] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
 
 const [showModal, setShowModal] = useState(false);
@@ -15,20 +16,21 @@ const [selectedClaim, setSelectedClaim] = useState(null);
 
   const [claims, setClaims] = useState([]);
 
-  const mediaRecorderReference = useRef(null);
-  const audioContextReference = useRef(null);
-  const analyserReference = useRef(null);
-  const animationFrameReference = useRef(null);
+  // const mediaRecorderReference = useRef(null);
+  // const audioContextReference = useRef(null);
+  // const analyserReference = useRef(null);
+  // const animationFrameReference = useRef(null);
   const wsRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     connectWebSocket();
 
     // Cleanup when component unmounts
     return () => {
-      if (animationFrameReference.current) {
-        cancelAnimationFrame(animationFrameReference.current);
-      }
+      // if (animationFrameReference.current) {
+      //   cancelAnimationFrame(animationFrameReference.current);
+      // }
 
       if (wsRef.current) {
         wsRef.current.close();
@@ -147,79 +149,136 @@ const [selectedClaim, setSelectedClaim] = useState(null);
     }
   }
 
-  const startRecording = async () => {
+  // const startRecording = async () => {
+  //   if (!wsConnected) {
+  //     alert("WebSocket not connected! Make sure the backend is running.");
+  //     return;
+  //   }
+
+  //   try {
+  //     // Request microphone access
+  //     const stream = await navigator.mediaDevices.getUserMedia({
+  //       audio: {
+  //         channelCount: 1,
+  //         sampleRate: 16000,
+  //         echoCancellation: true,
+  //         noiseSuppression: true
+  //       }
+  //     });
+
+  //     // Setup audio visualisation
+  //     audioContextReference.current = new AudioContext();
+  //     analyserReference.current = audioContextReference.current.createAnalyser();
+  //     const source = audioContextReference.current.createMediaStreamSource(stream);
+  //     source.connect(analyserReference.current);
+  //     analyserReference.current.fftSize = 2048;
+  //     analyserReference.current.smoothingTimeConstant = 0.3;
+  //     visualiseAudio();
+
+  //     // Create MediaRecorder with WebM format
+  //     const mediaRecorder = new MediaRecorder(stream, {
+  //       mimeType: 'audio/webm;codecs=opus',
+  //       audioBitsPerSecond: 16000
+  //     });
+
+  //     const sessionId = `${Date.now()}-${Math.random()}`;
+  //     if (wsRef.current?.readyState === WebSocket.OPEN) {
+  //       wsRef.current.send(JSON.stringify({
+  //         id: sessionId
+  //       }));
+  //       console.log(`Sent ID: `, sessionId);
+  //     }
+
+
+  //     mediaRecorder.ondataavailable = (event) => {
+  //       if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+  //         wsRef.current.send(event.data);
+  //         console.log(`Sent audio chunk: ${event.data.size} bytes`);
+  //       }
+  //     };
+
+  //     mediaRecorder.start(250);
+  //     mediaRecorderReference.current = mediaRecorder;
+  //     setIsRecording(true);
+
+  //     console.log("Recording started; audio format: ", mediaRecorder.mimeType);
+  //   } catch (error) {
+  //   console.error("Error accessing microphone: ", error);
+  //   alert("Could not access microphone, please check permissions.");
+  //   }
+  // };
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
     if (!wsConnected) {
       alert("WebSocket not connected! Make sure the backend is running.");
       return;
     }
 
+    // Check if it's an audio file
+    if (!file.type.startsWith('audio/')) {
+      alert("Please upload an audio file.");
+      return;
+    }
+
+    setIsProcessing(true);
+    setTranscriptSegments([]);
+    setClaims([]);
+
     try {
-      // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true
-        }
-      });
-
-      // Setup audio visualisation
-      audioContextReference.current = new AudioContext();
-      analyserReference.current = audioContextReference.current.createAnalyser();
-      const source = audioContextReference.current.createMediaStreamSource(stream);
-      source.connect(analyserReference.current);
-      analyserReference.current.fftSize = 2048;
-      analyserReference.current.smoothingTimeConstant = 0.3;
-      visualiseAudio();
-
-      // Create MediaRecorder with WebM format
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-        audioBitsPerSecond: 16000
-      });
-
+      // Send session ID
       const sessionId = `${Date.now()}-${Math.random()}`;
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           id: sessionId
         }));
-        console.log(`Sent ID: `, sessionId);
+        console.log(`📤 Sent session ID: `, sessionId);
       }
 
+      // Read and send file in chunks
+      const chunkSize = 8192; // 8KB chunks
+      let offset = 0;
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(event.data);
-          console.log(`Sent audio chunk: ${event.data.size} bytes`);
+      while (offset < file.size) {
+        const chunk = file.slice(offset, offset + chunkSize);
+        const arrayBuffer = await chunk.arrayBuffer();
+        
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(arrayBuffer);
+          console.log(`📤 Sent audio chunk: ${arrayBuffer.byteLength} bytes (${offset + arrayBuffer.byteLength}/${file.size})`);
         }
-      };
-
-      mediaRecorder.start(250);
-      mediaRecorderReference.current = mediaRecorder;
-      setIsRecording(true);
-
-      console.log("Recording started; audio format: ", mediaRecorder.mimeType);
-    } catch (error) {
-    console.error("Error accessing microphone: ", error);
-    alert("Could not access microphone, please check permissions.");
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderReference.current && mediaRecorderReference.current.state !== 'inactive') {
-      mediaRecorderReference.current.stop();
-      mediaRecorderReference.current.stream.getTracks().forEach(track => track.stop());
-      setIsRecording(false);
-      setAudioLevel(0);
-
-      if (animationFrameReference.current) {
-        cancelAnimationFrame(animationFrameReference.current);
+        
+        offset += chunkSize;
+        
+        // Small delay to avoid overwhelming the connection
+        await new Promise(resolve => setTimeout(resolve, 50));
       }
 
-      console.log("Recording stopped");
+      console.log(`✅ Finished sending file: ${file.name}`);
+      setIsProcessing(false);
+    } catch (error) {
+      console.error("❌ Error uploading file: ", error);
+      alert("Error processing audio file.");
+      setIsProcessing(false);
     }
   };
+
+  // const stopRecording = () => {
+  //   if (mediaRecorderReference.current && mediaRecorderReference.current.state !== 'inactive') {
+  //     mediaRecorderReference.current.stop();
+  //     mediaRecorderReference.current.stream.getTracks().forEach(track => track.stop());
+  //     setIsRecording(false);
+  //     setAudioLevel(0);
+
+  //     if (animationFrameReference.current) {
+  //       cancelAnimationFrame(animationFrameReference.current);
+  //     }
+
+  //     console.log("Recording stopped");
+  //   }
+  // };
 
   const renderTranscript = () => {
     return transcriptSegments.map((segment) => {
@@ -260,29 +319,29 @@ const [selectedClaim, setSelectedClaim] = useState(null);
     }
   };
 
-  const visualiseAudio = () => {
-    if (!analyserReference.current) return;
+  // const visualiseAudio = () => {
+  //   if (!analyserReference.current) return;
 
-    const dataArray = new Uint8Array(analyserReference.current.fftSize);
+  //   const dataArray = new Uint8Array(analyserReference.current.fftSize);
 
-    const updateLevel = () => {
-      analyserReference.current.getByteTimeDomainData(dataArray);
+  //   const updateLevel = () => {
+  //     analyserReference.current.getByteTimeDomainData(dataArray);
 
-      let sum = 0;
-      for(let i = 0; i < dataArray.length; i++) {
-        const normalised = (dataArray[i] - 128) / 128;
-        sum += normalised * normalised;
-      }
+  //     let sum = 0;
+  //     for(let i = 0; i < dataArray.length; i++) {
+  //       const normalised = (dataArray[i] - 128) / 128;
+  //       sum += normalised * normalised;
+  //     }
 
-      const rms = Math.sqrt(sum / dataArray.length);
-      const level = rms * 300;
+  //     const rms = Math.sqrt(sum / dataArray.length);
+  //     const level = rms * 300;
 
-      setAudioLevel(Math.min(100, level));
-      animationFrameReference.current = requestAnimationFrame(updateLevel);
-    };
+  //     setAudioLevel(Math.min(100, level));
+  //     animationFrameReference.current = requestAnimationFrame(updateLevel);
+  //   };
 
-    updateLevel();
-  };
+  //   updateLevel();
+  // };
 
   return (
     <Container fluid style={{ height: '100vh', padding: '20px' }}>
@@ -294,17 +353,29 @@ const [selectedClaim, setSelectedClaim] = useState(null);
           </h1>
 
           <div className='mb-4'>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              accept="audio/*"
+              style={{ display: 'none' }}
+            />
             <Button
-              variant={isRecording ? 'danger' : 'primary'}
+              variant='primary'
               size='lg'
-              onClick={isRecording ? stopRecording : startRecording}
-              disabled={!wsConnected}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!wsConnected || isProcessing}
               style={{ minWidth: '200px' }}>
-                {isRecording ? 'Stop Recording' : 'Start Recording'}
+                {isProcessing ? 'Processing...' : 'Upload Audio File'}
             </Button>
             {!wsConnected && (
               <small className='text-danger d-block mt-2'>
                 Backend not connected!
+              </small>
+            )}
+            {isProcessing && (
+              <small className='text-info d-block mt-2'>
+                Processing audio file...
               </small>
             )}
           </div>
